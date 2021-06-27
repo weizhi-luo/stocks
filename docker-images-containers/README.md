@@ -14,3 +14,4 @@ Stocks project uses RabbitMQ as its message broker and it is built by following 
 Stocks project uses Seq as a centralized logging system for collecting logs from different services. The logging system is built following [Getting Started with Docker](https://docs.datalust.co/docs/getting-started-with-docker).
 ## Communication between docker containers
 After docker images are successfully spinned up to run in containers, one way to allow them to communicate with each other by attaching them to the same network. Docker comes with a default networking driver: bridge network
+![docker networks]()
