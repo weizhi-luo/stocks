@@ -1,0 +1,31 @@
+syntax = "proto3";
+import "google/protobuf/empty.proto";
+
+option csharp_namespace = "Argus";
+
+package scrape;
+
+service UnitedStatesStockTickersScraper {
+	rpc ScrapeiSharesCoreSPTotal (google.protobuf.Empty) returns (ScrapeStatusReply);
+	rpc ScrapeiSharesCoreSP500 (google.protobuf.Empty) returns (ScrapeStatusReply);
+	rpc ScrapeiSharesCoreSPMidCap (google.protobuf.Empty) returns (ScrapeStatusReply);
+	rpc ScrapeiSharesCoreSPSmallCap (google.protobuf.Empty) returns (ScrapeStatusReply);
+}
+
+service NasdaqTickersScraper {
+	rpc ScrapeNasdaqListed (google.protobuf.Empty) returns (ScrapeStatusReply);
+	rpc ScrapeOtherListed (google.protobuf.Empty) returns (ScrapeStatusReply);
+}
+
+service UnitedStatesStockPricesScraper {
+	rpc ScrapeYahooFinanceDailyPrices (google.protobuf.Empty) returns (ScrapeStatusReply);
+	rpc ScrapeYahooFinanceDailyPricesByTickers (ScrapeWithTickersRequest) returns (ScrapeStatusReply);
+}
+
+message ScrapeStatusReply {
+	string message = 1;
+}
+
+message ScrapeWithTickersRequest {
+    repeated string tickers = 1;
+}
