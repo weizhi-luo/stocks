@@ -1,15 +1,15 @@
 # Docker images and containers
 ## Docker images used in Stocks project
-Stocks project consists of multiple services (Argus, Hermes and Hygieia), as well as a database server hosting relevant databases for the services, a message broker allowing data exchange, and a logging system collecting service logs.
+Stocks project consists of multiple services (Argus, Hermes and Hygieia), as well as a database server, a work queue allowing data transmission, and a centralized logging system collecting service logs.
 
-Argus, Hermes and Hygieia services are created using .NET 5. However, the database server, message broker and logging system are built using existing docker images for the solutions below:
+Argus, Hermes and Hygieia services are created using .NET 5. However, the database server, work queue and logging system are built using existing docker images below:
 * Microsoft SQL Server: 
 * RabbitMQ
-* Seq logging
+* Seq
 ### Microsoft SQL Server
 Stocks project uses Microsoft SQL Server as its database server. It pulls docker image __*mcr.microsoft.com/mssql/server:2019-latest*__ and builds a database server based on the documentation at [Quickstart: Run SQL Server container images with Docker](https://docs.microsoft.com/en-us/sql/linux/quickstart-install-connect-docker?view=sql-server-ver15&pivots=cs1-bash).
 ### RabbitMQ
-Stocks project uses RabbitMQ as its message broker. The docker image used is __*rabbitmq:3-management*__ and it is built by following the instructions at [Downloading and Installing RabbitMQ](https://www.rabbitmq.com/download.html) and [Get Started with RabbitMQ on Docker](https://codeburst.io/get-started-with-rabbitmq-on-docker-4428d7f6e46b).
+Stocks project uses RabbitMQ as its message broker to create a work queue. The docker image used is __*rabbitmq:3-management*__ and it is built following the instructions at [Downloading and Installing RabbitMQ](https://www.rabbitmq.com/download.html) and [Get Started with RabbitMQ on Docker](https://codeburst.io/get-started-with-rabbitmq-on-docker-4428d7f6e46b).
 ### Seq
 Stocks project uses Seq as a centralized logging system for collecting logs from different services. Docker image __*datalust/seq:latest*__ is used and the logging system is built following [Getting Started with Docker](https://docs.datalust.co/docs/getting-started-with-docker).
 ## Communication between docker containers
