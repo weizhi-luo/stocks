@@ -23,3 +23,11 @@ If the message broker is unable to handle the message, a basic.nack command will
 If the message cannot be routed to the queue specified, a basic.return command will be returned. An error will be created with related work queue exchange, reply code, reply text, routing key, basic properties and time stamp. The error will be sent to the unpublishable message queue service. Unpublishable message queue stores the error and allows users to check what message is unpublishable. 
 
 ### Health check
+Health check includes multiple services which monitor the status of health of various processes and infrastructure:
+* availability of SQL Server
+* availability of work queue (RabbitMQ)
+* data scraper services status
+* data publish status
+
+#### SQL server and RabbitMQ health checks
+Since ASP .NET Core 2.2, [health checks](https://docs.microsoft.com/en-gb/dotnet/architecture/microservices/implement-resilient-applications/monitor-app-health) become a build-in feature of .NET Core. For checking the health status of SQL Server and RabbitMQ, the simplest way is to call ```AddSqlServer()``` and ```AddRabbitMQ()``` methods in ```ConfigureServices()``` method in Startup.cs file:
