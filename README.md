@@ -1,5 +1,5 @@
 # Stocks project
-Repository of Stocks project, which builds the system for stocks market data scrape, import and storage. The system structure is shown below:
+Repository of Stocks project, which builds the system for stocks market data scrape, import and storage. 
 
 ![Overview](https://github.com/weizhi-luo/stocks/blob/main/doc/images/overview.png)
 
