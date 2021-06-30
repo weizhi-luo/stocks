@@ -1,11 +1,11 @@
 # Docker images and containers
 ## Docker images used in Stocks project
-Stocks project consists of multiple services (Argus, Hermes and Hygieia), as well as a database server, a work queue allowing data transmission, and a centralized logging system collecting service logs.
+Stocks project consists of multiple services (Argus, Hermes and Hygieia), as well as a database server with multiple databases, a work queue allowing data transmission, and a centralized logging system collecting service logs.
 
 Argus, Hermes and Hygieia services are created using .NET 5. However, the database server, work queue and logging system are built using existing docker images below:
-* Microsoft SQL Server: 
-* RabbitMQ
-* Seq
+* [Microsoft SQL Server](https://hub.docker.com/_/microsoft-mssql-server): 
+* [RabbitMQ](https://hub.docker.com/_/rabbitmq)
+* [Seq](https://hub.docker.com/r/datalust/seq)
 ### Microsoft SQL Server
 Stocks project uses Microsoft SQL Server as its database server. It pulls docker image __*mcr.microsoft.com/mssql/server:2019-latest*__ and builds a database server based on the documentation at [Quickstart: Run SQL Server container images with Docker](https://docs.microsoft.com/en-us/sql/linux/quickstart-install-connect-docker?view=sql-server-ver15&pivots=cs1-bash).
 ### RabbitMQ
@@ -13,7 +13,7 @@ Stocks project uses RabbitMQ as its message broker to create a work queue. The d
 ### Seq
 Stocks project uses Seq as a centralized logging system for collecting logs from different services. Docker image __*datalust/seq:latest*__ is used and the logging system is built following [Getting Started with Docker](https://docs.datalust.co/docs/getting-started-with-docker).
 ## Communication between docker containers
-After docker images are successfully configured to run in containers, one way to allow them to communicate with each other is by attaching them to the same network. Docker comes with a default networking driver, bridge network, and all containers are attached to it.
+After docker images are successfully configured to run in containers, one way to allow them to communicate with each other is attaching them to the same network. Docker comes with a default networking driver, bridge network, and all containers are attached to it.
 
 ![docker networks](https://github.com/weizhi-luo/stocks/blob/main/docker-images-containers/docker%20network%20list.PNG)
 
