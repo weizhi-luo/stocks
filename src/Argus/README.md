@@ -47,7 +47,7 @@ To allow health checks to be invoked, a middleware is added to ```Configure()```
 ![health_check_endpoint](https://github.com/weizhi-luo/stocks/blob/main/doc/images/health_check_endpoint.PNG)
 
 ## Web API
-Status and error information stored in service status queue, data publish queue and unpublishable message queue services not only facilitate health check services, but they also can be queried in Web APIs by using contollers:
+Status and error information stored in service status queue, data publish queue and unpublishable message queue services not only facilitate health check services, but they also can be queried in Web APIs using contollers:
 
 ![contoller](https://github.com/weizhi-luo/stocks/blob/main/doc/images/controllers.PNG)
 
@@ -55,4 +55,4 @@ Status and error information stored in service status queue, data publish queue 
 
 ![swagger_ui](https://github.com/weizhi-luo/stocks/blob/main/doc/images/swagger_ui.PNG)
 
-The Web APIs, for example GrpcServiceProcedureStatus APIs presented above, return different status when executing data scraper services and procedures. These results can be used for creating more applications such as a dashboard for showing real time process report. 
+The Web APIs, for example GrpcServiceProcedureStatus APIs presented above, return different statuses after executing data scraper services and procedures. These results can be used for creating more applications such as a dashboard for showing real time process report. 
