@@ -5,7 +5,7 @@ It imports [AspNetCore.HealthChecks.UI](https://www.nuget.org/packages/AspNetCor
 
 ![hygieia_inhect_health_check_ui](https://github.com/weizhi-luo/stocks/blob/main/doc/images/hygieia_inject_health_check_ui.PNG)
 
-The "/healthcheck" endpoints exposed in [Argus](https://github.com/weizhi-luo/stocks/tree/main/src/Argus) and [Hermes](https://github.com/weizhi-luo/stocks/tree/main/src/Hermes) services can be called by Hygieia service by add the following settings in appsettings.json file:
+The "/healthcheck" endpoints exposed in [Argus](https://github.com/weizhi-luo/stocks/tree/main/src/Argus) and [Hermes](https://github.com/weizhi-luo/stocks/tree/main/src/Hermes) services can be called by Hygieia service by adding the following settings in appsettings.json file:
 ```
    "HealthChecksUI": {
     "HealthChecks": [
