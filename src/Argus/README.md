@@ -37,7 +37,9 @@ Since ASP .NET Core 2.2, [health checks](https://docs.microsoft.com/en-gb/dotnet
 ### Data scraper services and data publsih health check
 As illustrated above, service status queue, data publish queue and unpublishable message queue services store status and error information. Based on this status and error information, customised services can be created to carry out processes health check. 
 
-A customised health check service can be created by defining a class which implements interface ```Microsoft.Extensions.Diagnostics.HealthChecks.IHealthCheck``` and method ```CheckHealthAsync()```. For example, in order to monitor the status of data scraper services, ```CheckHealthAsync()``` can whether there are any Error and Warning statuses in service status queue. If there are any, ```CheckHealthAsync()``` can return a result as unhealthy with error/warning details.
+A customised health check service can be created by defining a class which implements interface ```Microsoft.Extensions.Diagnostics.HealthChecks.IHealthCheck``` and method ```CheckHealthAsync()```. For example, in order to monitor the status of data scraper services, ```CheckHealthAsync()``` can whether there are any Error and Warning statuses in service status queue. If there are any, ```CheckHealthAsync()``` can return a result as unhealthy with error/warning details. The customised health check services can be injected in ```ConfigureServices()``` method in Startup.cs file:
+
+![argus_customised_health_checks](https://github.com/weizhi-luo/stocks/blob/main/doc/images/argus_customised_health_checks.PNG)
 
 ### Invoking health checks
 To invoke health checks, a middleware is added to ```Configure()``` method in Startup.cs file to expose a "/healthcheck" endpoint. This endpoint can be remotely called by users, applications or services to have health checks invoked. 
