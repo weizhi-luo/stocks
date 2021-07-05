@@ -1,5 +1,4 @@
-﻿using Dapper;
-using Google.Protobuf.Collections;
+﻿using Google.Protobuf.Collections;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Microsoft.Extensions.Configuration;
@@ -8,7 +7,6 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Data.SqlClient;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -107,7 +105,7 @@ namespace Argus
 
             try
             {
-                var yahooDailyPriceScrapeRecords = DatabaseHelper.DatabaseQuery<YahooDailyPriceScrapeRecord>(_connectionString, 
+                var yahooDailyPriceScrapeRecords = DatabaseHelper.Query<YahooDailyPriceScrapeRecord>(_connectionString, 
                     "SELECT Ticker, [Include], BenchmarkDate, BenchmarkOpen, BenchmarkHigh, " + 
                     "BenchmarkLow, BenchmarkClose, BenchmarkAdjustedClose, BenchmarkVolume " +
                     "FROM dbo.YahooDailyPriceScrapeRecord WHERE [Include] = 1", 90);
@@ -155,7 +153,7 @@ namespace Argus
                     return;
                 }
 
-                var yahooDailyPriceScrapeRecords = DatabaseHelper.DatabaseQuery<YahooDailyPriceScrapeRecord>(_connectionString,
+                var yahooDailyPriceScrapeRecords = DatabaseHelper.Query<YahooDailyPriceScrapeRecord>(_connectionString,
                     "SELECT Ticker, [Include], BenchmarkDate, BenchmarkOpen, BenchmarkHigh, " +
                     "BenchmarkLow, BenchmarkClose, BenchmarkAdjustedClose, BenchmarkVolume " +
                     "FROM dbo.YahooDailyPriceScrapeRecord WHERE [Include] = 1 " +
@@ -226,8 +224,8 @@ namespace Argus
                 try
                 {
                     var period1UnixTimestamp = scrapeRecord.BenchmarkDate.HasValue ?
-                        WebScrapeServiceHelper.GetUnixTimeStamp(scrapeRecord.BenchmarkDate.Value.AddDays(-14)) : UnixTimestampStart;
-                    var period2UnixTimestamp = WebScrapeServiceHelper.GetUnixTimeStamp(DateTime.Today.AddDays(1));
+                        ScrapeServiceHelper.GetUnixTimeStamp(scrapeRecord.BenchmarkDate.Value.AddDays(-14)) : UnixTimestampStart;
+                    var period2UnixTimestamp = ScrapeServiceHelper.GetUnixTimeStamp(DateTime.Today.AddDays(1));
                     var requestUri = $"{scrapeRecord.Ticker}?period1={period1UnixTimestamp}&period2={period2UnixTimestamp}&interval=1d&events=history&includeAdjustedClose=true";
 
                     string content = null;
@@ -323,24 +321,19 @@ namespace Argus
 
                     var scrapeRecordToSave = tickerDailyPrices.OrderByDescending(x => x.Key).Skip(1).First().Value;
 
-                    using (var connection = new SqlConnection(_connectionString))
-                    {
-                        connection.Execute("dbo.YahooDailyPriceScrapeRecord_InsertUpdateSingleRecord",
-                            param: new
-                            {
-                                ticker = scrapeRecordToSave.Ticker,
-                                include = scrapeRecord.Include,
-                                benchmarkDate = scrapeRecordToSave.ValueDate,
-                                benchmarkOpen = scrapeRecordToSave.Open,
-                                benchmarkHigh = scrapeRecordToSave.High,
-                                benchmarkLow = scrapeRecordToSave.Low,
-                                benchmarkClose = scrapeRecordToSave.Close,
-                                benchmarkAdjustedClose = scrapeRecordToSave.AdjustedClose,
-                                benchmarkVolume = scrapeRecordToSave.Volume
-                            },
-                            commandType: System.Data.CommandType.StoredProcedure,
-                            commandTimeout: 90);
-                    }
+                    DatabaseHelper.ExecuteStoredProcedure(_connectionString, "dbo.YahooDailyPriceScrapeRecord_InsertUpdateSingleRecord",
+                        new
+                        {
+                            ticker = scrapeRecordToSave.Ticker,
+                            include = scrapeRecord.Include,
+                            benchmarkDate = scrapeRecordToSave.ValueDate,
+                            benchmarkOpen = scrapeRecordToSave.Open,
+                            benchmarkHigh = scrapeRecordToSave.High,
+                            benchmarkLow = scrapeRecordToSave.Low,
+                            benchmarkClose = scrapeRecordToSave.Close,
+                            benchmarkAdjustedClose = scrapeRecordToSave.AdjustedClose,
+                            benchmarkVolume = scrapeRecordToSave.Volume
+                        }, 90);
                 }
                 catch (Exception exception)
                 {
@@ -416,11 +409,6 @@ namespace Argus
 
             for (var i = 0; i < lines.Length; i++)
             {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return null;
-                }
-
                 if (string.Equals(lines[i], "Date,Open,High,Low,Close,Adj Close,Volume", StringComparison.OrdinalIgnoreCase))
                 {
                     columnNamesLineIndex = i;

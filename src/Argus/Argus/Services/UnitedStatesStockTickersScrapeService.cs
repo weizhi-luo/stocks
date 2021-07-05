@@ -208,28 +208,38 @@ namespace Argus
 
         private async Task ScrapeiSharesCoreSPData(string procedureName, string requestUri)
         {
-            var csvContent = await ScrapeiSharesCsvContentAsync(procedureName, requestUri);
+            _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+                new GrpcServiceProcedureStatus
+                {
+                    ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                    Status = Status.Information,
+                    Detail = $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.",
+                    UtcTimestamp = DateTime.UtcNow
+                });
 
-            if (string.IsNullOrEmpty(csvContent) || string.IsNullOrWhiteSpace(csvContent))
-                return;
+            string csvContent;
             
             try
             {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Information,
-                        Detail = $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
-                var iSharesCoreSPData = ProcessiSharesCoreSPData(csvContent, procedureName, _cancellationToken);
-
-                if (_cancellationToken.IsCancellationRequested || iSharesCoreSPData == null)
+                csvContent = await ScrapeiSharesCsvContentAsync(requestUri);
+            }
+            catch (DataScrapeFailException exception)
+            {
+                if (exception.InnerException is HttpRequestException httpRequestException)
                 {
-                    return;
+                    ScrapeServiceHelper.HandleHttpRequestException(httpRequestException, _logger, _serviceProcedureStatusQueue, _serviceName, procedureName, exception.Message);
                 }
+                else
+                {
+                    ScrapeServiceHelper.HandleScrapeException(exception.InnerException, _logger, _serviceProcedureStatusQueue, _serviceName, procedureName, _cancellationTokenSource);
+                }
+
+                return;
+            }
+            
+            try
+            {
+                var iSharesCoreSPData = ProcessiSharesCoreSPData(csvContent);
 
                 _dataPublishQueue.EnqueueDataToPublish(new DataToPublish
                 {
@@ -252,6 +262,19 @@ namespace Argus
 
                 _logger.LogInformation($"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.");
             }
+            catch (DataNotScrapedException)
+            {
+                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
+                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+                    new GrpcServiceProcedureStatus
+                    {
+                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                        Status = Status.Warning,
+                        Detail = "did not scrape any data",
+                        UtcTimestamp = DateTime.UtcNow
+                    }
+                );
+            }
             catch (Exception exception)
             {
                 _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
@@ -266,7 +289,14 @@ namespace Argus
             }
         }
 
-        private async Task<string> ScrapeiSharesCsvContentAsync(string procedureName, string requestUri)
+        /// <summary>
+        /// Scrape csv file content from iShares website
+        /// </summary>
+        /// <param name="requestUri">Uri to csv file</param>
+        /// <exception cref="DataScrapeFailException">The scraping operation failed.</exception>
+        /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
+        /// <returns></returns>
+        private async Task<string> ScrapeiSharesCsvContentAsync(string requestUri)
         {
             string csvContent = null;
             using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri))
@@ -281,8 +311,7 @@ namespace Argus
                         }
                         catch (HttpRequestException exception)
                         {
-                            WebScrapeServiceHelper.HandleHttpRequestException(exception, _logger, _serviceProcedureStatusQueue, _serviceName, procedureName, response);
-                            return null;
+                            throw new DataScrapeFailException(response.Content.ReadAsStringAsync().Result, exception);
                         }
 
                         csvContent = await response.Content.ReadAsStringAsync(_cancellationToken);
@@ -290,29 +319,27 @@ namespace Argus
 
                     if (string.IsNullOrEmpty(csvContent) || string.IsNullOrWhiteSpace(csvContent))
                     {
-                        _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                            new GrpcServiceProcedureStatus
-                            {
-                                ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                                Status = Status.Warning,
-                                Detail = "did not scrape any data",
-                                UtcTimestamp = DateTime.UtcNow
-                            });
-
-                        _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
+                        throw new DataNotScrapedException();
                     }
 
                     return csvContent;
                 }
                 catch (Exception exception)
                 {
-                    WebScrapeServiceHelper.HandleScrapeException(exception, _logger, _serviceProcedureStatusQueue, _serviceName, procedureName, _cancellationTokenSource);
-                    return null;
+                    throw new DataScrapeFailException($"Failed to scrape data from {requestUri}", exception);
                 }
             }
         }
 
-        private string ProcessiSharesCoreSPData(string rawData, string procedureName, CancellationToken cancellationToken)
+        /// <summary>
+        /// Process iShares core Standard and Poor's tickers data 
+        /// </summary>
+        /// <param name="rawData">iShares core Standard and Poor's tickers csv file content</param>
+        /// <exception cref="DataProcessFailException">The data process operation failed due to unexpected sectors and/or exchanges.</exception>
+        /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
+        /// <exception cref="InvalidDataException">Data content is invalid.</exception>
+        /// <returns></returns>
+        private string ProcessiSharesCoreSPData(string rawData)
         {
             var scrapeTimestampUtc = DateTime.UtcNow;
             var unexpectedSectors = new HashSet<string>();
@@ -333,15 +360,10 @@ namespace Argus
 
             for (var i = 0; i < lines.Length; i++)
             {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return null;
-                }
-
                 if (string.Equals(lines[i].Trim(), "Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date", 
-                    StringComparison.InvariantCultureIgnoreCase) 
-                    || string.Equals(lines[i].Trim(), "Ticker,Name,Type,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date",
-                    StringComparison.InvariantCultureIgnoreCase))
+                      StringComparison.InvariantCultureIgnoreCase) ||
+                    string.Equals(lines[i].Trim(), "Ticker,Name,Type,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date",
+                      StringComparison.InvariantCultureIgnoreCase))
                 {
                     columnNamesLineIndex = i;
                     break;
@@ -395,7 +417,7 @@ namespace Argus
                 throw new InvalidDataException("Failed to extract index for required column(s).");
             }
 
-            var stockList = WebScrapeServiceHelper.CreateGenericList(new
+            var stockList = ScrapeServiceHelper.CreateGenericList(new
             {
                 Ticker = "",
                 Name = "",
@@ -413,11 +435,6 @@ namespace Argus
             for (var i = columnNamesLineIndex + 1; i < lines.Length; i++)
             {
                 var continueLoop = false;
-
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return null;
-                }
 
                 if (string.IsNullOrEmpty(lines[i]) || string.IsNullOrWhiteSpace(lines[i]))
                 {
@@ -478,45 +495,18 @@ namespace Argus
 
             if (unexpectedSectors.Any() || unexpectedExchanges.Any())
             {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Warning,
-                        Detail = (unexpectedSectors.Any() ? $"Unexpected sectors: {string.Join(",", unexpectedSectors)}{Environment.NewLine}" : "") + 
-                            (unexpectedExchanges.Any() ? $"Unexpected exchanges: {string.Join(",", unexpectedExchanges)}" : ""),
-                        UtcTimestamp = DateTime.UtcNow
-                    }
-                );
-
-                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.{Environment.NewLine}" + 
-                    (unexpectedSectors.Any() ? $"Unexpected sectors: {string.Join(",", unexpectedSectors)}{Environment.NewLine}" : "") + 
-                    (unexpectedExchanges.Any() ? $"Unexpected exchanges: {string.Join(",", unexpectedExchanges)}" : ""));
-
-                return null;
+                throw new DataProcessFailException((unexpectedSectors.Any() ? $"Unexpected sectors: {string.Join(",", unexpectedSectors)}{Environment.NewLine}" : "") +
+                            (unexpectedExchanges.Any() ? $"Unexpected exchanges: {string.Join(",", unexpectedExchanges)}" : ""));
             }
 
             if (!stockList.Any())
             {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Warning,
-                        Detail = "did not scrape any data",
-                        UtcTimestamp = DateTime.UtcNow
-                    }
-                );
-
-                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-
-                return null;
+                throw new DataNotScrapedException();
             }
 
             return JsonConvert.SerializeObject(stockList);
         }       
-
-        
+                
         public void Dispose()
         {
             _cancellationTokenSource.Cancel();

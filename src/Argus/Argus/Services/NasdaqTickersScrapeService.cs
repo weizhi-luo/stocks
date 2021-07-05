@@ -5,8 +5,6 @@ using Newtonsoft.Json;
 using System;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Security;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -110,27 +108,95 @@ namespace Argus
             }
         }
 
-        private async Task ScrapeNasdaqData(string procedureName, string ftpFilePath, Func<string, string, CancellationToken, string> ProcessAndConvertNasdaqDataToJson)
+        private async Task ScrapeNasdaqData(string procedureName, string ftpFilePath, Func<string, CancellationToken, string> ProcessAndConvertNasdaqDataToJson)
         {
             _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Information,
-                        Detail = $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
+                new GrpcServiceProcedureStatus
+                {
+                    ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                    Status = Status.Information,
+                    Detail = $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.",
+                    UtcTimestamp = DateTime.UtcNow
+                });
 
-            var fileContent = await DownloadFtpFileContentAsync(ftpFilePath, procedureName);
-
-            if (fileContent == null)
-                return;
+            string fileContent;
 
             try
             {
-                var nasdaqData = ProcessAndConvertNasdaqDataToJson(fileContent, procedureName, _cancellationToken);
+                fileContent = await ScrapeServiceHelper.DownloadFtpFileContentAsync(ftpFilePath, "anonymous", "");
+            }
+            catch (DataScrapeFailException exception)
+            {
+                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
+                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+                    new GrpcServiceProcedureStatus
+                    {
+                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                        Status = Status.Error,
+                        Detail = $"failed{Environment.NewLine}{exception}",
+                        UtcTimestamp = DateTime.UtcNow
+                    });
+                
+                return;
+            }
+            catch (DataNotScrapedException)
+            {
+                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
+                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+                    new GrpcServiceProcedureStatus
+                    {
+                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                        Status = Status.Warning,
+                        Detail = "did not scrape any data",
+                        UtcTimestamp = DateTime.UtcNow
+                    });
 
-                if (_cancellationToken.IsCancellationRequested || nasdaqData == null)
+                return;
+            }
+
+            try
+            {
+                string nasdaqData;
+
+                try
+                {
+                    nasdaqData = ProcessAndConvertNasdaqDataToJson(fileContent, _cancellationToken);
+                }
+                catch (CancellationRequestedException)
+                {
+                    return;
+                }
+                catch (DataNotScrapedException)
+                {
+                    _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
+                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+                        new GrpcServiceProcedureStatus
+                        {
+                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                            Status = Status.Warning,
+                            Detail = "did not scrape any data",
+                            UtcTimestamp = DateTime.UtcNow
+                        }
+                    );
+                    
+                    return;
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
+                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+                        new GrpcServiceProcedureStatus
+                        {
+                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                            Status = Status.Error,
+                            Detail = $"failed{Environment.NewLine}{exception}",
+                            UtcTimestamp = DateTime.UtcNow
+                        });
+
+                    return;
+                }
+                
+                if (_cancellationToken.IsCancellationRequested)
                 {
                     return;
                 }
@@ -170,7 +236,17 @@ namespace Argus
             }
         }
 
-        private string ProcessAndConvertNasdaqOtherListedToJson(string fileContent, string procedureName, CancellationToken cancellationToken)
+        /// <summary>
+        /// Process other listed tickers data and convert to Json
+        /// </summary>
+        /// <param name="fileContent">File content on Nasdaq FTP for other listed tickers</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Other listed tickers data converted to Json</returns>
+        /// <exception cref="CancellationRequestedException">Cancellation is requested.</exception>
+        /// <exception cref="InvalidDataException">Data content is invalid.</exception>
+        /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
+        /// <exception cref="DataProcessFailException">The data process operation failed due to unexpected data.</exception>
+        private string ProcessAndConvertNasdaqOtherListedToJson(string fileContent, CancellationToken cancellationToken)
         {
             var scrapeTimestampUtc = DateTime.UtcNow;
 
@@ -190,7 +266,7 @@ namespace Argus
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
-                    return null;
+                    throw new CancellationRequestedException();
                 }
 
                 if (string.Equals(lines[i].Trim(), "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol",
@@ -248,7 +324,7 @@ namespace Argus
                 throw new InvalidDataException("Failed to extract indexes for required column(s).");
             }
 
-            var tickerList = WebScrapeServiceHelper.CreateGenericList(lines.Skip(columnNamesLineIndex + 1)
+            var tickerList = ScrapeServiceHelper.CreateGenericList(lines.Skip(columnNamesLineIndex + 1)
                 .Where(x => !string.IsNullOrEmpty(x) && !string.IsNullOrWhiteSpace(x) && !x.StartsWith("File Creation Time:", StringComparison.OrdinalIgnoreCase))
                 .Select(x =>
                 {
@@ -274,7 +350,7 @@ namespace Argus
                     }
                     else
                     {
-                        throw new InvalidDataException($"ETF value '{lineElements[etfIndex].Trim()}' from line '{x}' is unexpected.");
+                        throw new DataProcessFailException($"ETF value '{lineElements[etfIndex].Trim()}' from line '{x}' is unexpected.");
                     }
 
                     var roundLotSize = int.Parse(lineElements[roundLotSizeIndex].Trim());
@@ -290,7 +366,7 @@ namespace Argus
                     }
                     else
                     {
-                        throw new InvalidDataException($"Test Issue value '{lineElements[testIssueIndex].Trim()}' from  line '{x}' is unexpected.");
+                        throw new DataProcessFailException($"Test Issue value '{lineElements[testIssueIndex].Trim()}' from line '{x}' is unexpected.");
                     }
 
                     var nasdaqSymbol = lineElements[nasdaqSymbolIndex].Trim();
@@ -311,26 +387,23 @@ namespace Argus
 
             if (!tickerList.Any())
             {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Warning,
-                        Detail = "did not scrape any data",
-                        UtcTimestamp = DateTime.UtcNow
-                    }
-                );
-
-                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-
-                return null;
+                throw new DataNotScrapedException();
             }
 
             return JsonConvert.SerializeObject(tickerList);
         }
 
-
-        private string ProcessAndConvertNasdaqListedToJson(string fileContent, string procedureName, CancellationToken cancellationToken)
+        /// <summary>
+        /// Process Nasdaq listed tickers data and convert to Json
+        /// </summary>
+        /// <param name="fileContent">File content on Nasdaq FTP for listed tickers</param>
+        /// <param name="cancellationToken">Cancellation token</param>
+        /// <returns>Nasdaq listed tickers data converted to Json</returns>
+        /// <exception cref="CancellationRequestedException">Cancellation is requested.</exception>
+        /// <exception cref="InvalidDataException">Data content is invalid.</exception>
+        /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
+        /// <exception cref="DataProcessFailException">The data process operation failed due to unexpected data.</exception>
+        private string ProcessAndConvertNasdaqListedToJson(string fileContent, CancellationToken cancellationToken)
         {
             var scrapeTimestampUtc = DateTime.UtcNow;
 
@@ -350,7 +423,7 @@ namespace Argus
             {
                 if (cancellationToken.IsCancellationRequested)
                 {
-                    return null;
+                    throw new CancellationRequestedException();
                 }
 
                 if (string.Equals(lines[i].Trim(), "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares", 
@@ -408,7 +481,7 @@ namespace Argus
                 throw new InvalidDataException("Failed to extract indexes for required column(s).");
             }
 
-            var tickerList = WebScrapeServiceHelper.CreateGenericList(lines.Skip(columnNamesLineIndex + 1)
+            var tickerList = ScrapeServiceHelper.CreateGenericList(lines.Skip(columnNamesLineIndex + 1)
                 .Where(x => !string.IsNullOrEmpty(x) && !string.IsNullOrWhiteSpace(x) && !x.StartsWith("File Creation Time:", StringComparison.OrdinalIgnoreCase))
                 .Select(x =>
                 {
@@ -429,7 +502,7 @@ namespace Argus
                     }
                     else
                     {
-                        throw new InvalidDataException($"Test Issue value '{lineElements[testIssueIndex].Trim()}' from  line '{x}' is unexpected.");
+                        throw new DataProcessFailException($"Test Issue value '{lineElements[testIssueIndex].Trim()}' from line '{x}' is unexpected.");
                     }
 
                     var financialStatus = lineElements[financialStatusIndex].Trim();
@@ -450,7 +523,7 @@ namespace Argus
                     }
                     else
                     {
-                        throw new InvalidDataException($"ETF value '{lineElements[etfIndex].Trim()}' from line '{x}' is unexpected.");
+                        throw new DataProcessFailException($"ETF value '{lineElements[etfIndex].Trim()}' from line '{x}' is unexpected.");
                     }
 
                     bool? nextShares;
@@ -468,7 +541,7 @@ namespace Argus
                     }
                     else
                     {
-                        throw new InvalidDataException($"NextShare value '{lineElements[nextSharesIndex].Trim()}' from line '{x}' is unexpected.");
+                        throw new DataProcessFailException($"NextShare value '{lineElements[nextSharesIndex].Trim()}' from line '{x}' is unexpected.");
                     }
 
                     return new
@@ -487,360 +560,12 @@ namespace Argus
 
             if (!tickerList.Any())
             {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Warning,
-                        Detail = "did not scrape any data",
-                        UtcTimestamp = DateTime.UtcNow
-                    }
-                );
-
-                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-
-                return null;
+                throw new DataNotScrapedException();
             }
 
             return JsonConvert.SerializeObject(tickerList);
         }
-
-        private string ProcessAndConvertOtherListedToJson(string fileContent, string procedureName, CancellationToken cancellationToken)
-        {
-            var scrapeTimestampUtc = DateTime.UtcNow;
-
-            var columnNamesLineIndex = -1;
-            var tickerIndex = -1;
-            var nameIndex = -1;
-            var marketCategoryIndex = -1;
-            var testIssueIndex = -1;
-            var financialStatusIndex = -1;
-            var roundLotSizeIndex = -1;
-            var etfIndex = -1;
-            var nextSharesIndex = -1;
-
-            var lines = fileContent.Split(Environment.NewLine);
-
-            for (var i = 0; i < lines.Length; i++)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    return null;
-                }
-
-                if (string.Equals(lines[i].Trim(), "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares",
-                    StringComparison.InvariantCultureIgnoreCase))
-                {
-                    columnNamesLineIndex = i;
-                    break;
-                }
-            }
-
-            if (columnNamesLineIndex == -1)
-            {
-                throw new InvalidDataException("Failed to extract column names line.");
-            }
-
-            var columnNames = lines[columnNamesLineIndex].Split("|");
-            for (var i = 0; i < columnNames.Length; i++)
-            {
-                var columnNameTrimmedLowerCase = columnNames[i].Trim().ToLower();
-
-                switch (columnNameTrimmedLowerCase)
-                {
-                    case "symbol":
-                        tickerIndex = i;
-                        break;
-                    case "security name":
-                        nameIndex = i;
-                        break;
-                    case "market category":
-                        marketCategoryIndex = i;
-                        break;
-                    case "test issue":
-                        testIssueIndex = i;
-                        break;
-                    case "financial status":
-                        financialStatusIndex = i;
-                        break;
-                    case "round lot size":
-                        roundLotSizeIndex = i;
-                        break;
-                    case "etf":
-                        etfIndex = i;
-                        break;
-                    case "nextshares":
-                        nextSharesIndex = i;
-                        break;
-                    default:
-                        break;
-                }
-            }
-
-            if (tickerIndex == -1 || nameIndex == -1 || marketCategoryIndex == -1 || testIssueIndex == -1 ||
-                financialStatusIndex == -1 || roundLotSizeIndex == -1 || etfIndex == -1 || nextSharesIndex == -1)
-            {
-                throw new InvalidDataException("Failed to extract indexes for required column(s).");
-            }
-
-            var tickerList = WebScrapeServiceHelper.CreateGenericList(lines.Skip(columnNamesLineIndex + 1)
-                .Where(x => !string.IsNullOrEmpty(x) && !string.IsNullOrWhiteSpace(x) && !x.StartsWith("File Creation Time:", StringComparison.OrdinalIgnoreCase))
-                .Select(x =>
-                {
-                    var lineElements = x.Split("|");
-
-                    var ticker = lineElements[tickerIndex].Trim();
-                    var name = lineElements[nameIndex].Trim();
-                    var marketCategory = lineElements[marketCategoryIndex].Trim();
-
-                    bool testIssue;
-                    if (string.Equals(lineElements[testIssueIndex].Trim(), "N", StringComparison.OrdinalIgnoreCase))
-                    {
-                        testIssue = false;
-                    }
-                    else if (string.Equals(lineElements[testIssueIndex].Trim(), "Y", StringComparison.OrdinalIgnoreCase))
-                    {
-                        testIssue = true;
-                    }
-                    else
-                    {
-                        throw new InvalidDataException($"Test Issue value '{lineElements[testIssueIndex].Trim()}' from  line '{x}' is unexpected.");
-                    }
-
-                    var financialStatus = lineElements[financialStatusIndex].Trim();
-                    var roundLotSize = int.Parse(lineElements[roundLotSizeIndex].Trim());
-
-                    bool? etf;
-                    if (string.Equals(lineElements[etfIndex].Trim(), "N", StringComparison.OrdinalIgnoreCase))
-                    {
-                        etf = false;
-                    }
-                    else if (string.Equals(lineElements[etfIndex].Trim(), "Y", StringComparison.OrdinalIgnoreCase))
-                    {
-                        etf = true;
-                    }
-                    else if (string.IsNullOrEmpty(lineElements[etfIndex].Trim()))
-                    {
-                        etf = null;
-                    }
-                    else
-                    {
-                        throw new InvalidDataException($"ETF value '{lineElements[etfIndex].Trim()}' from line '{x}' is unexpected.");
-                    }
-
-                    bool? nextShares;
-                    if (string.Equals(lineElements[nextSharesIndex].Trim(), "N", StringComparison.OrdinalIgnoreCase))
-                    {
-                        nextShares = false;
-                    }
-                    else if (string.Equals(lineElements[nextSharesIndex].Trim(), "Y", StringComparison.OrdinalIgnoreCase))
-                    {
-                        nextShares = true;
-                    }
-                    else if (string.IsNullOrEmpty(lineElements[nextSharesIndex].Trim()))
-                    {
-                        nextShares = null;
-                    }
-                    else
-                    {
-                        throw new InvalidDataException($"NextShare value '{lineElements[nextSharesIndex].Trim()}' from line '{x}' is unexpected.");
-                    }
-
-                    return new
-                    {
-                        Ticker = ticker,
-                        Name = name,
-                        MarketCategory = marketCategory,
-                        TestIssue = testIssue,
-                        FinancialStatus = financialStatus,
-                        RoundLotSize = roundLotSize,
-                        ETF = etf,
-                        NextShares = nextShares,
-                        ScrapeTimestampUtc = scrapeTimestampUtc
-                    };
-                }).ToArray());
-
-            if (!tickerList.Any())
-            {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Warning,
-                        Detail = "did not scrape any data",
-                        UtcTimestamp = DateTime.UtcNow
-                    }
-                );
-
-                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-
-                return null;
-            }
-
-            return JsonConvert.SerializeObject(tickerList);
-        }
-
-        private async Task<string> DownloadFtpFileContentAsync(string ftpFilePath, string procedureName)
-        {
-            string errorInformation = null;
-            Exception exceptionCaptured = null;
-            string fileContent = null;
-
-            FtpWebRequest ftpRequest;
-            try
-            {
-                ftpRequest = (FtpWebRequest)WebRequest.Create(ftpFilePath);
-                ftpRequest.Method = WebRequestMethods.Ftp.DownloadFile;
-                ftpRequest.Credentials = new NetworkCredential("anonymous", "");
-            }
-            catch (NotSupportedException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to registered URI scheme";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (ArgumentNullException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to null URI";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (SecurityException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to lack of WebPermissionAttribute permission to connect to the request URI or a URI that the request is redirect to";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (UriFormatException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to invalid URI";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (Exception exception)
-            {
-                errorInformation = "failed";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            finally
-            {
-                if (errorInformation != null || exceptionCaptured != null)
-                {
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Error,
-                            Detail = $"{errorInformation}{Environment.NewLine}{exceptionCaptured}",
-                            UtcTimestamp = DateTime.UtcNow
-                        });
-                }
-            }
-            
-            try
-            {
-                using (var response = await ftpRequest.GetResponseAsync())
-                {
-                    using (var responseStream = response.GetResponseStream())
-                    {
-                        using (var reader = new StreamReader(responseStream))
-                        {
-                            fileContent = await reader.ReadToEndAsync();
-                        }
-                    }
-                }
-
-                if (string.IsNullOrEmpty(fileContent) || string.IsNullOrWhiteSpace(fileContent))
-                {
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Warning,
-                            Detail = "did not scrape any data",
-                            UtcTimestamp = DateTime.UtcNow
-                        });
-
-                    _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-                }
-
-                return fileContent;
-            }
-            catch (ArgumentOutOfRangeException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to the number of characters exceeding {int.MaxValue}";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (ObjectDisposedException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to disposed stream";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (InvalidOperationException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to stream reader being used";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (ArgumentNullException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to null stream";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (ArgumentException exception)
-            {
-                errorInformation = $"failed to download file content from {ftpFilePath} due to unreadable stream";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            catch (Exception exception)
-            {
-                errorInformation = "failed";
-                exceptionCaptured = exception;
-                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' {errorInformation}");
-
-                return null;
-            }
-            finally
-            {
-                if (errorInformation != null || exceptionCaptured != null)
-                {
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Error,
-                            Detail = $"{errorInformation}{Environment.NewLine}{exceptionCaptured}",
-                            UtcTimestamp = DateTime.UtcNow
-                        });
-                }
-            }
-        }
-
+                
         public void Dispose()
         {
             _cancellationTokenSource.Cancel();
