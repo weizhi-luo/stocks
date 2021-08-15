@@ -38,38 +38,12 @@ namespace Argus
         public static void HandleScrapeException(Exception exception, ILogger logger, GrpcServiceProcedureStatusQueue serviceProcedureStatusQueue, 
             string serviceName, string procedureName, CancellationTokenSource cancellationTokenSource)
         {
-            string errorInformation;
+            if (exception is TaskCanceledException && cancellationTokenSource.IsCancellationRequested)
+                return;
 
-            if (exception is InvalidOperationException)
-            {
-                errorInformation = "failed due to uses a request which is already sent";
-            }
-            else if (exception is HttpRequestException)
-            {
-                errorInformation = "failed due to an underlying issue such as network connectivity, DNS failure, server certificate validation or timeout";
-            }
-            else if (exception is TaskCanceledException)
-            {
-                if (cancellationTokenSource.IsCancellationRequested)
-                {
-                    return;
-                }
+            var errorDetail = GenerateScrapeErrorDetail(exception);
 
-                if (exception.InnerException is TimeoutException)
-                {
-                    errorInformation = "failed due to timeout";
-                }
-                else
-                {
-                    errorInformation = "failed";
-                }
-            }
-            else
-            {
-                errorInformation = "failed";
-            }
-
-            var loggingErrorMessage = $"Service '{serviceName}' procedure '{procedureName}' {errorInformation}.";
+            var loggingErrorMessage = $"Service '{serviceName}' procedure '{procedureName}' {errorDetail}.";
 
             logger.LogError(exception, loggingErrorMessage);
             serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
@@ -77,9 +51,29 @@ namespace Argus
                 {
                     ServiceProcedure = new GrpcServiceProcedure { Service = serviceName, Procedure = procedureName },
                     Status = Status.Error,
-                    Detail = $"{errorInformation}{Environment.NewLine}{exception}",
+                    Detail = $"{errorDetail}{Environment.NewLine}{exception}",
                     UtcTimestamp = DateTime.UtcNow
                 });
+        }
+
+        private static string GenerateScrapeErrorDetail(Exception exception)
+        {
+            if (exception is InvalidOperationException)
+            {
+                return "failed due to uses a request which is already sent";
+            }
+            
+            if (exception is HttpRequestException)
+            {
+                return "failed due to an underlying issue such as network connectivity, DNS failure, server certificate validation or timeout";
+            }
+            
+            if (exception is TaskCanceledException && exception.InnerException is TimeoutException)
+            {
+                return "failed due to timeout";
+            }
+
+            return "failed";
         }
 
         public static uint GetUnixTimeStamp(DateTime dateTime)
@@ -98,8 +92,14 @@ namespace Argus
         /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
         public async static Task<string> DownloadFtpFileContentAsync(string ftpFilePath, string username, string password)
         {
-            string fileContent = null;
+            var ftpRequest = CreateFtpDownloadRequest(ftpFilePath, username, password);
+            var fileContent = await DownloadFtpFileContentAsync(ftpRequest);
+            
+            return fileContent;
+        }
 
+        private static FtpWebRequest CreateFtpDownloadRequest(string ftpFilePath, string username, string password)
+        {
             FtpWebRequest ftpRequest;
             try
             {
@@ -130,6 +130,13 @@ namespace Argus
                 throw new DataScrapeFailException("failed", exception);
             }
 
+            return ftpRequest;
+        }
+
+        private async static Task<string> DownloadFtpFileContentAsync(FtpWebRequest ftpRequest)
+        {
+            string fileContent;
+
             try
             {
                 using (var response = await ftpRequest.GetResponseAsync())
@@ -145,23 +152,23 @@ namespace Argus
             }
             catch (ArgumentOutOfRangeException exception)
             {
-                throw new DataScrapeFailException($"failed to download file content from {ftpFilePath} due to the number of characters exceeding {int.MaxValue}", exception);
+                throw new DataScrapeFailException($"failed to download file content from {ftpRequest.RequestUri} due to the number of characters exceeding {int.MaxValue}", exception);
             }
             catch (ObjectDisposedException exception)
             {
-                throw new DataScrapeFailException($"failed to download file content from {ftpFilePath} due to disposed stream", exception);
+                throw new DataScrapeFailException($"failed to download file content from {ftpRequest.RequestUri} due to disposed stream", exception);
             }
             catch (InvalidOperationException exception)
             {
-                throw new DataScrapeFailException($"failed to download file content from {ftpFilePath} due to stream reader being used", exception);
+                throw new DataScrapeFailException($"failed to download file content from {ftpRequest.RequestUri} due to stream reader being used", exception);
             }
             catch (ArgumentNullException exception)
             {
-                throw new DataScrapeFailException($"failed to download file content from {ftpFilePath} due to null stream", exception);
+                throw new DataScrapeFailException($"failed to download file content from {ftpRequest.RequestUri} due to null stream", exception);
             }
             catch (ArgumentException exception)
             {
-                throw new DataScrapeFailException($"failed to download file content from {ftpFilePath} due to unreadable stream", exception);
+                throw new DataScrapeFailException($"failed to download file content from {ftpRequest.RequestUri} due to unreadable stream", exception);
             }
             catch (Exception exception)
             {

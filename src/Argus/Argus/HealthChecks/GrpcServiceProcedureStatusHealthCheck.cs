@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -25,37 +26,44 @@ namespace Argus.HealthChecks
                 return Task.FromResult(HealthCheckResult.Healthy("No GRPC service/procedure is called yet."));
             }
 
-            var errors = new List<GrpcServiceProcedureStatus>();
-            var warnings = new List<GrpcServiceProcedureStatus>();
+            var (errorMessage, warningMessage) = GenerateErrorAndWarningMessage(statuses);
 
-            foreach(var status in statuses)
+            if (!string.IsNullOrEmpty(errorMessage))
+            {
+                return Task.FromResult(
+                    HealthCheckResult.Unhealthy($"GRPC services/procedures ran with errors:{Environment.NewLine}{errorMessage}"));
+            }
+
+            if (!string.IsNullOrEmpty(warningMessage))
+            {
+                return Task.FromResult(
+                    HealthCheckResult.Degraded($"GRPC services/procedures ran with warnings:{Environment.NewLine}{warningMessage}"));
+            }
+
+            return Task.FromResult(HealthCheckResult.Healthy("GRPC services/procedures ran without errors."));
+        }
+
+        private (string ErrorMessage, string WarningMessage) GenerateErrorAndWarningMessage(ICollection<GrpcServiceProcedureStatus> statuses)
+        {
+            var errorMessageBuilder = new StringBuilder();
+            var warningMessageBuilder = new StringBuilder();
+
+            foreach (var status in statuses)
             {
                 switch (status.Status)
                 {
                     case Status.Error:
-                        errors.Add(status);
+                        errorMessageBuilder.AppendLine("\t" + status.Detail);
                         break;
                     case Status.Warning:
-                        warnings.Add(status);
+                        warningMessageBuilder.AppendLine("\t" + status.Detail);
                         break;
                     default:
                         break;
                 }
             }
 
-            if (errors.Any())
-            {
-                return Task.FromResult(
-                    HealthCheckResult.Unhealthy($"GRPC services/procedures ran with errors:{Environment.NewLine}{string.Join(Environment.NewLine, errors.Select(x => "\t" + x.Detail))}"));
-            }
-
-            if (warnings.Any())
-            {
-                return Task.FromResult(
-                    HealthCheckResult.Degraded($"GRPC services/procedures ran with warnings:{Environment.NewLine}{string.Join(Environment.NewLine, warnings.Select(x => "\t" + x.Detail))}"));
-            }
-
-            return Task.FromResult(HealthCheckResult.Healthy("GRPC services/procedures ran without errors."));
+            return (errorMessageBuilder.ToString(), warningMessageBuilder.ToString());
         }
     }
 }

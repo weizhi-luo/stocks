@@ -59,7 +59,6 @@ namespace Argus
         private void Monitor()
         {
             var wait = new ManualResetEventSlim(false);
-            var methodName = nameof(Monitor);
 
             while (!_cancellationToken.IsCancellationRequested)
             {
@@ -81,14 +80,7 @@ namespace Argus
                     continue;
                 }
 
-                try
-                {
-                    AddOrUpdateLatestServiceProcedureStatus(serviceProcedureStatus);
-                }
-                catch (Exception exception)
-                {
-                    _logger.LogError(exception, $"Service '{_serviceName}' method '{methodName}' failed to add or update latest service procedure status.");
-                }
+                AddOrUpdateLatestServiceProcedureStatus(serviceProcedureStatus);
             }
 
             _isMonitorLoopStarted = 0;
@@ -102,18 +94,25 @@ namespace Argus
 
         private void AddOrUpdateLatestServiceProcedureStatus(GrpcServiceProcedureStatus serviceProcedureStatus)
         {
-            _latestServiceProcedureStatuses.AddOrUpdate(serviceProcedureStatus.ServiceProcedure, serviceProcedureStatus,
-                (k, v) => {
-                    if (v.UtcTimestamp >= serviceProcedureStatus.UtcTimestamp)
-                    {
-                        return v;
-                    }
+            try
+            {
+                _latestServiceProcedureStatuses.AddOrUpdate(serviceProcedureStatus.ServiceProcedure, serviceProcedureStatus,
+                    (k, v) => {
+                        if (v.UtcTimestamp >= serviceProcedureStatus.UtcTimestamp)
+                        {
+                            return v;
+                        }
 
-                    v.Status = serviceProcedureStatus.Status;
-                    v.Detail = serviceProcedureStatus.Detail;
-                    v.UtcTimestamp = serviceProcedureStatus.UtcTimestamp;
-                    return v;
-                });
+                        v.Status = serviceProcedureStatus.Status;
+                        v.Detail = serviceProcedureStatus.Detail;
+                        v.UtcTimestamp = serviceProcedureStatus.UtcTimestamp;
+                        return v;
+                    });
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, $"Service '{_serviceName}' failed to add or update latest service procedure status.");
+            }
         }
 
         public ICollection<GrpcServiceProcedureStatus> GetLatestServiceProcedureStatuses()

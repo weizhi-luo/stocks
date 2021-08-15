@@ -82,14 +82,7 @@ namespace Argus
                     continue;
                 }
 
-                try
-                {
-                    AddOrUpdateLatestUnpublishableMessage(unpublishableMessage);
-                }
-                catch (Exception exception)
-                {
-                    _logger.LogError(exception, $"Service '{_serviceName}' failed to add or update unpublishable message.");
-                }
+                AddOrUpdateLatestUnpublishableMessage(unpublishableMessage);
             }
 
             _isMonitorLoopStarted = 0;
@@ -103,28 +96,31 @@ namespace Argus
 
         private void AddOrUpdateLatestUnpublishableMessage(UnpublishableMessage unpublishableMessage)
         {
-            string key;
-            using (SHA256 sha256 = SHA256.Create())
+            try
             {
-                key = GetHash(sha256, $"{unpublishableMessage.Exchange}|{unpublishableMessage.ReplyCode}|{unpublishableMessage.ReplyText}|{unpublishableMessage.RoutingKey}");
-            }
+                var key = GetHash($"{unpublishableMessage.Exchange}|{unpublishableMessage.ReplyCode}|{unpublishableMessage.ReplyText}|{unpublishableMessage.RoutingKey}");
 
-            _latestUnpublishableMessages.AddOrUpdate(key, unpublishableMessage,
-                (k, v) =>
-                {
-                    if (v.UtcTimestamp >= unpublishableMessage.UtcTimestamp)
+                _latestUnpublishableMessages.AddOrUpdate(key, unpublishableMessage,
+                    (k, v) =>
                     {
-                        return v;
-                    }
+                        if (v.UtcTimestamp >= unpublishableMessage.UtcTimestamp)
+                        {
+                            return v;
+                        }
 
-                    v.BasicProperties = unpublishableMessage.BasicProperties;
-                    v.Exchange = unpublishableMessage.Exchange;
-                    v.ReplyCode = unpublishableMessage.ReplyCode;
-                    v.ReplyText = unpublishableMessage.ReplyText;
-                    v.RoutingKey = unpublishableMessage.RoutingKey;
-                    v.UtcTimestamp = unpublishableMessage.UtcTimestamp;
-                    return v;
-                });
+                        v.BasicProperties = unpublishableMessage.BasicProperties;
+                        v.Exchange = unpublishableMessage.Exchange;
+                        v.ReplyCode = unpublishableMessage.ReplyCode;
+                        v.ReplyText = unpublishableMessage.ReplyText;
+                        v.RoutingKey = unpublishableMessage.RoutingKey;
+                        v.UtcTimestamp = unpublishableMessage.UtcTimestamp;
+                        return v;
+                    });
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, $"Service '{_serviceName}' failed to add or update unpublishable message.");
+            }
         }
 
         public ConcurrentDictionary<string, UnpublishableMessage> GetLatestUnpublishableMessages()
@@ -137,18 +133,21 @@ namespace Argus
             return _latestUnpublishableMessages.TryRemove(key, out _);
         }
 
-        private string GetHash(HashAlgorithm hashAlgorithm, string input)
+        private string GetHash(string input)
         {
-            byte[] data = hashAlgorithm.ComputeHash(Encoding.UTF8.GetBytes(input));
-
-            var builder = new StringBuilder();
-
-            for (int i = 0; i < data.Length; i++)
+            using (SHA256 sha256 = SHA256.Create())
             {
-                builder.Append(data[i].ToString("x2"));
-            }
+                byte[] data = sha256.ComputeHash(Encoding.UTF8.GetBytes(input));
 
-            return builder.ToString();
+                var builder = new StringBuilder();
+
+                for (int i = 0; i < data.Length; i++)
+                {
+                    builder.Append(data[i].ToString("x2"));
+                }
+
+                return builder.ToString();
+            }
         }
     }
 
