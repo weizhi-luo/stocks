@@ -3,6 +3,7 @@ using Grpc.Core;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -12,13 +13,16 @@ namespace Argus
 {
     public class NasdaqTickersScrapeService : NasdaqTickersScraper.NasdaqTickersScraperBase, IDisposable
     {
+        private const string NasdaqOtherListedFileColumnNamesLine = "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol";
+
+        private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
+
         private readonly ILogger<NasdaqTickersScrapeService> _logger;
-        private readonly CancellationTokenSource _cancellationTokenSource;
-        private readonly CancellationToken _cancellationToken;
         private readonly DataPublishQueue _dataPublishQueue;
         private readonly GrpcServiceProcedureStatusQueue _serviceProcedureStatusQueue;
+        private readonly CancellationToken _cancellationToken;
         private readonly string _serviceName;
-
+       
         private uint _isScrapingNasdaqListed;
         private Task _nasdaqListedScrapeTask;
         private uint _isScrapingOtherListed;
@@ -27,10 +31,10 @@ namespace Argus
         public NasdaqTickersScrapeService(ILogger<NasdaqTickersScrapeService> logger, DataPublishQueue dataPublishQueue, GrpcServiceProcedureStatusQueue serviceProcedureStatusQueue)
         {
             _logger = logger;
-            _cancellationTokenSource = new CancellationTokenSource();
-            _cancellationToken = _cancellationTokenSource.Token;
             _dataPublishQueue = dataPublishQueue;
             _serviceProcedureStatusQueue = serviceProcedureStatusQueue;
+
+            _cancellationToken = _cancellationTokenSource.Token;
             _serviceName = GetType().Name;
 
             _isScrapingNasdaqListed = 0;
@@ -108,16 +112,34 @@ namespace Argus
             }
         }
 
-        private async Task ScrapeNasdaqData(string procedureName, string ftpFilePath, Func<string, CancellationToken, string> ProcessAndConvertNasdaqDataToJson)
+        private void EnqueueServiceProcedureStatus(string procedureName, Status status, string detail)
         {
             _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
                 new GrpcServiceProcedureStatus
                 {
                     ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                    Status = Status.Information,
-                    Detail = $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.",
+                    Status = status,
+                    Detail = detail,
                     UtcTimestamp = DateTime.UtcNow
                 });
+        }
+
+        private void EnqueueDataToPublish(string procedureName, string data)
+        {
+            _dataPublishQueue.EnqueueDataToPublish(new DataToPublish
+            {
+                ServiceProcedure = new GrpcServiceProcedure
+                {
+                    Service = _serviceName,
+                    Procedure = procedureName
+                },
+                Data = data
+            });
+        }
+
+        private async Task ScrapeNasdaqData(string procedureName, string ftpFilePath, Func<string, string> ProcessAndConvertNasdaqDataToJson)
+        {
+            EnqueueServiceProcedureStatus(procedureName, Status.Information, $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.");
 
             string fileContent;
 
@@ -128,28 +150,14 @@ namespace Argus
             catch (DataScrapeFailException exception)
             {
                 _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Error,
-                        Detail = $"failed{Environment.NewLine}{exception}",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
+                EnqueueServiceProcedureStatus(procedureName, Status.Error, $"failed{Environment.NewLine}{exception}");
                 
                 return;
             }
             catch (DataNotScrapedException)
             {
                 _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Warning,
-                        Detail = "did not scrape any data",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
+                EnqueueServiceProcedureStatus(procedureName, Status.Warning, "did not scrape any data");
 
                 return;
             }
@@ -160,7 +168,7 @@ namespace Argus
 
                 try
                 {
-                    nasdaqData = ProcessAndConvertNasdaqDataToJson(fileContent, _cancellationToken);
+                    nasdaqData = ProcessAndConvertNasdaqDataToJson(fileContent);
                 }
                 catch (CancellationRequestedException)
                 {
@@ -169,29 +177,14 @@ namespace Argus
                 catch (DataNotScrapedException)
                 {
                     _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Warning,
-                            Detail = "did not scrape any data",
-                            UtcTimestamp = DateTime.UtcNow
-                        }
-                    );
+                    EnqueueServiceProcedureStatus(procedureName, Status.Warning, "did not scrape any data");
                     
                     return;
                 }
                 catch (Exception exception)
                 {
                     _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Error,
-                            Detail = $"failed{Environment.NewLine}{exception}",
-                            UtcTimestamp = DateTime.UtcNow
-                        });
+                    EnqueueServiceProcedureStatus(procedureName, Status.Error, $"failed{Environment.NewLine}{exception}");
 
                     return;
                 }
@@ -201,56 +194,48 @@ namespace Argus
                     return;
                 }
 
-                _dataPublishQueue.EnqueueDataToPublish(new DataToPublish
-                {
-                    ServiceProcedure = new GrpcServiceProcedure
-                    {
-                        Service = _serviceName,
-                        Procedure = procedureName
-                    },
-                    Data = nasdaqData
-                });
-
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Success,
-                        Detail = $"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
+                EnqueueDataToPublish(procedureName, nasdaqData);
+                EnqueueServiceProcedureStatus(procedureName, Status.Success, $"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.");
 
                 _logger.LogInformation($"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.");
             }
             catch (Exception exception)
             {
                 _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Error,
-                        Detail = $"failed{Environment.NewLine}{exception}",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
+                EnqueueServiceProcedureStatus(procedureName, Status.Error, $"failed{Environment.NewLine}{exception}");
             }
+        }
+
+        private bool TryFindColumnNamesLineIndex(string[] lines, string columnNamesLine, out int columnNamesLineIndex)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+
+                if (string.Equals(lines[i].Trim(), columnNamesLine,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    columnNamesLineIndex = i;
+                    return true;
+                }
+            }
+
+            columnNamesLineIndex = -1;
+            return false;
         }
 
         /// <summary>
         /// Process other listed tickers data and convert to Json
         /// </summary>
         /// <param name="fileContent">File content on Nasdaq FTP for other listed tickers</param>
-        /// <param name="cancellationToken">Cancellation token</param>
         /// <returns>Other listed tickers data converted to Json</returns>
         /// <exception cref="CancellationRequestedException">Cancellation is requested.</exception>
         /// <exception cref="InvalidDataException">Data content is invalid.</exception>
         /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
         /// <exception cref="DataProcessFailException">The data process operation failed due to unexpected data.</exception>
-        private string ProcessAndConvertNasdaqOtherListedToJson(string fileContent, CancellationToken cancellationToken)
+        private string ProcessAndConvertNasdaqOtherListedToJson(string fileContent)
         {
             var scrapeTimestampUtc = DateTime.UtcNow;
 
-            var columnNamesLineIndex = -1;
             var tickerIndex = -1;
             var nameIndex = -1;
             var exchangeIndex = -1;
@@ -262,22 +247,7 @@ namespace Argus
 
             var lines = fileContent.Split(Environment.NewLine);
 
-            for (var i = 0; i < lines.Length; i++)
-            {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    throw new CancellationRequestedException();
-                }
-
-                if (string.Equals(lines[i].Trim(), "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol",
-                    StringComparison.InvariantCultureIgnoreCase))
-                {
-                    columnNamesLineIndex = i;
-                    break;
-                }
-            }
-
-            if (columnNamesLineIndex == -1)
+            if (!TryFindColumnNamesLineIndex(lines, NasdaqOtherListedFileColumnNamesLine, out var columnNamesLineIndex))
             {
                 throw new InvalidDataException("Failed to extract column names line.");
             }
@@ -285,32 +255,32 @@ namespace Argus
             var columnNames = lines[columnNamesLineIndex].Split("|");
             for (var i = 0; i < columnNames.Length; i++)
             {
-                var columnNameTrimmedLowerCase = columnNames[i].Trim().ToLower();
+                var columnName = columnNames[i];
 
-                switch (columnNameTrimmedLowerCase)
+                switch (columnName)
                 {
-                    case "act symbol":
+                    case "ACT Symbol":
                         tickerIndex = i;
                         break;
-                    case "security name":
+                    case "Security Name":
                         nameIndex = i;
                         break;
-                    case "exchange":
+                    case "Exchange":
                         exchangeIndex = i;
                         break;
-                    case "cqs symbol":
+                    case "CQS Symbol":
                         cqsSymbolIndex = i;
                         break;
-                    case "etf":
+                    case "ETF":
                         etfIndex = i;
                         break;
-                    case "round lot size":
+                    case "Round Lot Size":
                         roundLotSizeIndex = i;
                         break;
-                    case "test issue":
+                    case "Test Issue":
                         testIssueIndex = i;
                         break;
-                    case "nasdaq symbol":
+                    case "NASDAQ Symbol":
                         nasdaqSymbolIndex = i;
                         break;
                     default:
@@ -397,13 +367,12 @@ namespace Argus
         /// Process Nasdaq listed tickers data and convert to Json
         /// </summary>
         /// <param name="fileContent">File content on Nasdaq FTP for listed tickers</param>
-        /// <param name="cancellationToken">Cancellation token</param>
         /// <returns>Nasdaq listed tickers data converted to Json</returns>
         /// <exception cref="CancellationRequestedException">Cancellation is requested.</exception>
         /// <exception cref="InvalidDataException">Data content is invalid.</exception>
         /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
         /// <exception cref="DataProcessFailException">The data process operation failed due to unexpected data.</exception>
-        private string ProcessAndConvertNasdaqListedToJson(string fileContent, CancellationToken cancellationToken)
+        private string ProcessAndConvertNasdaqListedToJson(string fileContent)
         {
             var scrapeTimestampUtc = DateTime.UtcNow;
 
@@ -421,11 +390,6 @@ namespace Argus
 
             for (var i = 0; i < lines.Length; i++)
             {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    throw new CancellationRequestedException();
-                }
-
                 if (string.Equals(lines[i].Trim(), "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares", 
                     StringComparison.InvariantCultureIgnoreCase))
                 {
