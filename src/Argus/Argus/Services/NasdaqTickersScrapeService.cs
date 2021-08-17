@@ -3,7 +3,6 @@ using Grpc.Core;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -13,8 +12,6 @@ namespace Argus
 {
     public class NasdaqTickersScrapeService : NasdaqTickersScraper.NasdaqTickersScraperBase, IDisposable
     {
-        private const string NasdaqOtherListedFileColumnNamesLine = "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol";
-
         private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
 
         private readonly ILogger<NasdaqTickersScrapeService> _logger;
@@ -84,12 +81,12 @@ namespace Argus
 
         private async Task ScrapeNasdaqListed()
         {
+            const string FtpFilePath = "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt";
             var procedureName = nameof(ScrapeNasdaqListed);
-            var ftpFilePath = "ftp://ftp.nasdaqtrader.com/symboldirectory/nasdaqlisted.txt";
 
             try
             {
-                await ScrapeNasdaqData(procedureName, ftpFilePath, ProcessAndConvertNasdaqListedToJson);
+                await ScrapeNasdaqData(procedureName, FtpFilePath, ProcessAndConvertNasdaqListedToJson);
             }
             finally
             {
@@ -99,42 +96,17 @@ namespace Argus
 
         private async Task ScrapeNasdaqOtherListed()
         {
+            const string FtpFilePath = "ftp://ftp.nasdaqtrader.com/symboldirectory/otherlisted.txt";
             var procedureName = nameof(ScrapeNasdaqOtherListed);
-            var ftpFilePath = "ftp://ftp.nasdaqtrader.com/symboldirectory/otherlisted.txt";
-
+            
             try
             {
-                await ScrapeNasdaqData(procedureName, ftpFilePath, ProcessAndConvertNasdaqOtherListedToJson);
+                await ScrapeNasdaqData(procedureName, FtpFilePath, ProcessAndConvertNasdaqOtherListedToJson);
             }
             finally
             {
                 _isScrapingOtherListed = 0;
             }
-        }
-
-        private void EnqueueServiceProcedureStatus(string procedureName, Status status, string detail)
-        {
-            _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                new GrpcServiceProcedureStatus
-                {
-                    ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                    Status = status,
-                    Detail = detail,
-                    UtcTimestamp = DateTime.UtcNow
-                });
-        }
-
-        private void EnqueueDataToPublish(string procedureName, string data)
-        {
-            _dataPublishQueue.EnqueueDataToPublish(new DataToPublish
-            {
-                ServiceProcedure = new GrpcServiceProcedure
-                {
-                    Service = _serviceName,
-                    Procedure = procedureName
-                },
-                Data = data
-            });
         }
 
         private async Task ScrapeNasdaqData(string procedureName, string ftpFilePath, Func<string, string> ProcessAndConvertNasdaqDataToJson)
@@ -206,23 +178,6 @@ namespace Argus
             }
         }
 
-        private bool TryFindColumnNamesLineIndex(string[] lines, string columnNamesLine, out int columnNamesLineIndex)
-        {
-            for (var i = 0; i < lines.Length; i++)
-            {
-
-                if (string.Equals(lines[i].Trim(), columnNamesLine,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    columnNamesLineIndex = i;
-                    return true;
-                }
-            }
-
-            columnNamesLineIndex = -1;
-            return false;
-        }
-
         /// <summary>
         /// Process other listed tickers data and convert to Json
         /// </summary>
@@ -234,16 +189,17 @@ namespace Argus
         /// <exception cref="DataProcessFailException">The data process operation failed due to unexpected data.</exception>
         private string ProcessAndConvertNasdaqOtherListedToJson(string fileContent)
         {
-            var scrapeTimestampUtc = DateTime.UtcNow;
+            const string NasdaqOtherListedFileColumnNamesLine = "ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|Test Issue|NASDAQ Symbol";
+            const string TickerColumnName = "ACT Symbol";
+            const string NameColumnName = "Security Name";
+            const string ExchangeColumnName = "Exchange";
+            const string CqsSymbolColumnName = "CQS Symbol";
+            const string EtfColumnName = "ETF";
+            const string RoundLotSizeColumnName = "Round Lot Size";
+            const string TestIssueColumnName = "Test Issue";
+            const string NasdaqSymbolColumnName = "NASDAQ Symbol";
 
-            var tickerIndex = -1;
-            var nameIndex = -1;
-            var exchangeIndex = -1;
-            var cqsSymbolIndex = -1;
-            var etfIndex = -1;
-            var roundLotSizeIndex = -1;
-            var testIssueIndex = -1;
-            var nasdaqSymbolIndex = -1;
+            var scrapeTimestampUtc = DateTime.UtcNow;
 
             var lines = fileContent.Split(Environment.NewLine);
 
@@ -253,34 +209,43 @@ namespace Argus
             }
 
             var columnNames = lines[columnNamesLineIndex].Split("|");
+            var tickerIndex = -1;
+            var nameIndex = -1;
+            var exchangeIndex = -1;
+            var cqsSymbolIndex = -1;
+            var etfIndex = -1;
+            var roundLotSizeIndex = -1;
+            var testIssueIndex = -1;
+            var nasdaqSymbolIndex = -1;
+
             for (var i = 0; i < columnNames.Length; i++)
             {
                 var columnName = columnNames[i];
 
                 switch (columnName)
                 {
-                    case "ACT Symbol":
+                    case TickerColumnName:
                         tickerIndex = i;
                         break;
-                    case "Security Name":
+                    case NameColumnName:
                         nameIndex = i;
                         break;
-                    case "Exchange":
+                    case ExchangeColumnName:
                         exchangeIndex = i;
                         break;
-                    case "CQS Symbol":
+                    case CqsSymbolColumnName:
                         cqsSymbolIndex = i;
                         break;
-                    case "ETF":
+                    case EtfColumnName:
                         etfIndex = i;
                         break;
-                    case "Round Lot Size":
+                    case RoundLotSizeColumnName:
                         roundLotSizeIndex = i;
                         break;
-                    case "Test Issue":
+                    case TestIssueColumnName:
                         testIssueIndex = i;
                         break;
-                    case "NASDAQ Symbol":
+                    case NasdaqSymbolColumnName:
                         nasdaqSymbolIndex = i;
                         break;
                     default:
@@ -374,9 +339,26 @@ namespace Argus
         /// <exception cref="DataProcessFailException">The data process operation failed due to unexpected data.</exception>
         private string ProcessAndConvertNasdaqListedToJson(string fileContent)
         {
+            const string NasdaqListedFileColumnNamesLine = "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares";
+            const string TickerColumnName = "Symbol";
+            const string NameColumnName = "Security Name";
+            const string MarketCategoryColumnName = "Market Category";
+            const string TestIssueColumnName = "Test Issue";
+            const string FinancialStatusColumnName = "Financial Status";
+            const string RoundLotSizeColumnName = "Round Lot Size";
+            const string EtfColumnName = "ETF";
+            const string NextSharesColumnName = "NextShares";
+
             var scrapeTimestampUtc = DateTime.UtcNow;
 
-            var columnNamesLineIndex = -1;
+            var lines = fileContent.Split(Environment.NewLine);
+
+            if (!TryFindColumnNamesLineIndex(lines, NasdaqListedFileColumnNamesLine, out var columnNamesLineIndex))
+            {
+                throw new InvalidDataException("Failed to extract column names line.");
+            }
+
+            var columnNames = lines[columnNamesLineIndex].Split("|");
             var tickerIndex = -1;
             var nameIndex = -1;
             var marketCategoryIndex = -1;
@@ -386,52 +368,34 @@ namespace Argus
             var etfIndex = -1;
             var nextSharesIndex = -1;
 
-            var lines = fileContent.Split(Environment.NewLine);
-
-            for (var i = 0; i < lines.Length; i++)
-            {
-                if (string.Equals(lines[i].Trim(), "Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares", 
-                    StringComparison.InvariantCultureIgnoreCase))
-                {
-                    columnNamesLineIndex = i;
-                    break;
-                }
-            }
-
-            if (columnNamesLineIndex == -1)
-            {
-                throw new InvalidDataException("Failed to extract column names line.");
-            }
-
-            var columnNames = lines[columnNamesLineIndex].Split("|");
             for (var i = 0; i < columnNames.Length; i++)
             {
-                var columnNameTrimmedLowerCase = columnNames[i].Trim().ToLower();
+                var columnName = columnNames[i];
 
-                switch (columnNameTrimmedLowerCase)
+                switch (columnName)
                 {
-                    case "symbol":
+                    case TickerColumnName:
                         tickerIndex = i;
                         break;
-                    case "security name":
+                    case NameColumnName:
                         nameIndex = i;
                         break;
-                    case "market category":
+                    case MarketCategoryColumnName:
                         marketCategoryIndex = i;
                         break;
-                    case "test issue":
+                    case TestIssueColumnName:
                         testIssueIndex = i;
                         break;
-                    case "financial status":
+                    case FinancialStatusColumnName:
                         financialStatusIndex = i;
                         break;
-                    case "round lot size":
+                    case RoundLotSizeColumnName:
                         roundLotSizeIndex = i;
                         break;
-                    case "etf":
+                    case EtfColumnName:
                         etfIndex = i;
                         break;
-                    case "nextshares":
+                    case NextSharesColumnName:
                         nextSharesIndex = i;
                         break;
                     default:
@@ -529,7 +493,49 @@ namespace Argus
 
             return JsonConvert.SerializeObject(tickerList);
         }
-                
+
+        private void EnqueueServiceProcedureStatus(string procedureName, Status status, string detail)
+        {
+            _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+                new GrpcServiceProcedureStatus
+                {
+                    ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
+                    Status = status,
+                    Detail = detail,
+                    UtcTimestamp = DateTime.UtcNow
+                });
+        }
+
+        private void EnqueueDataToPublish(string procedureName, string data)
+        {
+            _dataPublishQueue.EnqueueDataToPublish(new DataToPublish
+            {
+                ServiceProcedure = new GrpcServiceProcedure
+                {
+                    Service = _serviceName,
+                    Procedure = procedureName
+                },
+                Data = data
+            });
+        }
+
+        private bool TryFindColumnNamesLineIndex(string[] lines, string columnNamesLine, out int columnNamesLineIndex)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+
+                if (string.Equals(lines[i].Trim(), columnNamesLine,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    columnNamesLineIndex = i;
+                    return true;
+                }
+            }
+
+            columnNamesLineIndex = -1;
+            return false;
+        }
+
         public void Dispose()
         {
             _cancellationTokenSource.Cancel();
