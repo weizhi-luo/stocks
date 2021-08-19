@@ -208,31 +208,32 @@ namespace Argus
 
         private async Task ScrapeiSharesCoreSPData(string procedureName, string requestUri)
         {
-            _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                new GrpcServiceProcedureStatus
-                {
-                    ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                    Status = Status.Information,
-                    Detail = $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.",
-                    UtcTimestamp = DateTime.UtcNow
-                });
+            ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, 
+                Status.Information, $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.");
 
             string csvContent;
-            
             try
             {
-                csvContent = await ScrapeiSharesCsvContentAsync(requestUri);
+                using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri))
+                {
+                    csvContent = await ScrapeServiceHelper.DownloadStringFromWebAsync(_iSharesHttpClient, request, _cancellationToken);
+                }
             }
-            catch (DataScrapeFailException exception)
+            catch (TaskCanceledException)
             {
-                if (exception.InnerException is HttpRequestException httpRequestException)
-                {
-                    ScrapeServiceHelper.HandleHttpRequestException(httpRequestException, _logger, _serviceProcedureStatusQueue, _serviceName, procedureName, exception.Message);
-                }
-                else
-                {
-                    ScrapeServiceHelper.HandleScrapeException(exception.InnerException, _logger, _serviceProcedureStatusQueue, _serviceName, procedureName, _cancellationTokenSource);
-                }
+                return;
+            }
+            catch (DataNotScrapedException)
+            {
+                _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Warning, "did not scrape any data");
+                
+                return;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Error, $"failed{Environment.NewLine}{exception}");
 
                 return;
             }
@@ -240,94 +241,21 @@ namespace Argus
             try
             {
                 var iSharesCoreSPData = ProcessiSharesCoreSPData(csvContent);
-
-                _dataPublishQueue.EnqueueDataToPublish(new DataToPublish
-                {
-                    ServiceProcedure = new GrpcServiceProcedure
-                    {
-                        Service = _serviceName,
-                        Procedure = procedureName
-                    },
-                    Data = iSharesCoreSPData
-                });
-
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Success,
-                        Detail = $"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
+                ScrapeServiceHelper.EnqueueDataToPublish(_dataPublishQueue, _serviceName, procedureName, iSharesCoreSPData);
+                
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Success, 
+                    $"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.");
                 _logger.LogInformation($"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.");
             }
             catch (DataNotScrapedException)
             {
                 _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data.");
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Warning,
-                        Detail = "did not scrape any data",
-                        UtcTimestamp = DateTime.UtcNow
-                    }
-                );
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Warning, "did not scrape any data");
             }
             catch (Exception exception)
             {
                 _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Error,
-                        Detail = $"failed{Environment.NewLine}{exception}",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-            }
-        }
-
-        /// <summary>
-        /// Scrape csv file content from iShares website
-        /// </summary>
-        /// <param name="requestUri">Uri to csv file</param>
-        /// <exception cref="DataScrapeFailException">The scraping operation failed.</exception>
-        /// <exception cref="DataNotScrapedException">Scraping result is empty.</exception>
-        /// <returns></returns>
-        private async Task<string> ScrapeiSharesCsvContentAsync(string requestUri)
-        {
-            string csvContent = null;
-            using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri))
-            {
-                try
-                {
-                    using (var response = await _iSharesHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _cancellationToken))
-                    {
-                        try
-                        {
-                            response.EnsureSuccessStatusCode();
-                        }
-                        catch (HttpRequestException exception)
-                        {
-                            throw new DataScrapeFailException(response.Content.ReadAsStringAsync().Result, exception);
-                        }
-
-                        csvContent = await response.Content.ReadAsStringAsync(_cancellationToken);
-                    }
-
-                    if (string.IsNullOrEmpty(csvContent) || string.IsNullOrWhiteSpace(csvContent))
-                    {
-                        throw new DataNotScrapedException();
-                    }
-
-                    return csvContent;
-                }
-                catch (Exception exception)
-                {
-                    throw new DataScrapeFailException($"Failed to scrape data from {requestUri}", exception);
-                }
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Error, $"failed{Environment.NewLine}{exception}");
             }
         }
 
@@ -341,12 +269,33 @@ namespace Argus
         /// <returns></returns>
         private string ProcessiSharesCoreSPData(string rawData)
         {
+            const string iSharesFileColumnNamesLine =
+                "Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date";
+            const string iSharesFileColumnNamesLineAlternative =
+                "Ticker,Name,Type,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date";
+            const string TickerColumnName = "Ticker";
+            const string NameColumnName = "Name";
+            const string SectorColumnName = "Sector";
+            const string AssetClassColumnName = "Asset Class";
+            const string CUSIPColumnName = "CUSIP";
+            const string ISINColumnName = "ISIN";
+            const string SEDOLColumnName = "SEDOL";
+            const string ExchangeColumnName = "Exchange";
+
             var scrapeTimestampUtc = DateTime.UtcNow;
+
+            var lines = rawData.Split(Environment.NewLine);
+            if (!ScrapeServiceHelper.TryFindLineIndex(lines, iSharesFileColumnNamesLine, out var columnNamesLineIndex) && 
+                !ScrapeServiceHelper.TryFindLineIndex(lines, iSharesFileColumnNamesLineAlternative, out columnNamesLineIndex))
+            {
+                throw new InvalidDataException("Failed to extract column names line.");
+            }
+
             var unexpectedSectors = new HashSet<string>();
             var unexpectedExchanges = new HashSet<string>();
             var processedTicker = new HashSet<string>();
 
-            var columnNamesLineIndex = -1;
+            var columnNames = lines[columnNamesLineIndex].Split(",");
             var tickerIndex = -1;
             var nameIndex = -1;
             var sectorIndex = -1;
@@ -355,55 +304,35 @@ namespace Argus
             var isinIndex = -1;
             var sedolIndex = -1;
             var exchangeIndex = -1;
-
-            var lines = rawData.Split(Environment.NewLine);
-
-            for (var i = 0; i < lines.Length; i++)
-            {
-                if (string.Equals(lines[i].Trim(), "Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date", 
-                      StringComparison.InvariantCultureIgnoreCase) ||
-                    string.Equals(lines[i].Trim(), "Ticker,Name,Type,Sector,Asset Class,Market Value,Weight (%),Notional Value,Shares,CUSIP,ISIN,SEDOL,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date",
-                      StringComparison.InvariantCultureIgnoreCase))
-                {
-                    columnNamesLineIndex = i;
-                    break;
-                }
-            }
-
-            if (columnNamesLineIndex == -1)
-            {
-                throw new InvalidDataException("Failed to extract column names line.");
-            }
-
-            var columnNames = lines[columnNamesLineIndex].Split(",");
+                        
             for (var i = 0; i < columnNames.Length; i++)
             {
                 var columnNameTrimmedLowerCase = columnNames[i].Trim().ToLower();
 
                 switch (columnNameTrimmedLowerCase)
                 {
-                    case "ticker":
+                    case TickerColumnName:
                         tickerIndex = i;
                         break;
-                    case "name":
+                    case NameColumnName:
                         nameIndex = i;
                         break;
-                    case "sector":
+                    case SectorColumnName:
                         sectorIndex = i;
                         break;
-                    case "asset class":
+                    case AssetClassColumnName:
                         assetClassIndex = i;
                         break;
-                    case "cusip":
+                    case CUSIPColumnName:
                         cusipIndex = i;
                         break;
-                    case "isin":
+                    case ISINColumnName:
                         isinIndex = i;
                         break;
-                    case "sedol":
+                    case SEDOLColumnName:
                         sedolIndex = i;
                         break;
-                    case "exchange":
+                    case ExchangeColumnName:
                         exchangeIndex = i;
                         break;
                     default:
@@ -429,7 +358,6 @@ namespace Argus
                 TimestampUtc = scrapeTimestampUtc
             });
 
-            //remove dummy element
             stockList.Clear();
 
             for (var i = columnNamesLineIndex + 1; i < lines.Length; i++)

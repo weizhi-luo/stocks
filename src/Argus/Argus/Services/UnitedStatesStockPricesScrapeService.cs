@@ -5,7 +5,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -28,11 +27,11 @@ namespace Argus
         
         private uint _isScrapingDailyPrices;
         private Task _dailyPricesScrapeTask;
-        private readonly ConcurrentDictionary<string, Exception> _dailyPricesScrapeFailed;
+        private readonly Dictionary<string, Exception> _dailyPricesScrapeFailed;
 
         private uint _isScrapingDailyPricesByTickers;
         private Task _dailyPricesByTickersScrapeTask;
-        private readonly ConcurrentDictionary<string, Exception> _dailyPricesByTickersScrapeFailed;
+        private readonly Dictionary<string, Exception> _dailyPricesByTickersScrapeFailed;
 
         private const uint UnixTimestampStart = 1262304000;
 
@@ -50,11 +49,11 @@ namespace Argus
 
             _isScrapingDailyPrices = 0;
             _dailyPricesScrapeTask = Task.CompletedTask;
-            _dailyPricesScrapeFailed = new ConcurrentDictionary<string, Exception>();
+            _dailyPricesScrapeFailed = new Dictionary<string, Exception>();
 
             _isScrapingDailyPricesByTickers = 0;
             _dailyPricesByTickersScrapeTask = Task.CompletedTask;
-            _dailyPricesByTickersScrapeFailed = new ConcurrentDictionary<string, Exception>();
+            _dailyPricesByTickersScrapeFailed = new Dictionary<string, Exception>();
         }
 
         public override Task<ScrapeStatusReply> ScrapeYahooFinanceDailyPrices(Empty request, ServerCallContext context)
@@ -99,30 +98,25 @@ namespace Argus
             return Task.FromResult(new ScrapeStatusReply { Message = "starts to scrape Yahoo finance daily prices by tickers" });
         }
 
-        private async Task ScrapeYahooFinanceDailyPrices(ConcurrentDictionary<string, Exception> dailyPricesTickersScrapeFailed)
+        private async Task ScrapeYahooFinanceDailyPrices(Dictionary<string, Exception> dailyPricesTickersScrapeFailed)
         {
+            const string DatabaseQuery = @"SELECT Ticker, [Include], BenchmarkDate, BenchmarkOpen, BenchmarkHigh, 
+                                           BenchmarkLow, BenchmarkClose, BenchmarkAdjustedClose, BenchmarkVolume 
+                                           FROM dbo.YahooDailyPriceScrapeRecord WHERE [Include] = 1";
+
             var procedureName = nameof(ScrapeYahooFinanceDailyPrices);
 
             try
             {
-                var yahooDailyPriceScrapeRecords = DatabaseHelper.Query<YahooDailyPriceScrapeRecord>(_connectionString, 
-                    "SELECT Ticker, [Include], BenchmarkDate, BenchmarkOpen, BenchmarkHigh, " + 
-                    "BenchmarkLow, BenchmarkClose, BenchmarkAdjustedClose, BenchmarkVolume " +
-                    "FROM dbo.YahooDailyPriceScrapeRecord WHERE [Include] = 1", 90);
+                var yahooDailyPriceScrapeRecords = DatabaseHelper.Query<YahooDailyPriceScrapeRecord>(_connectionString, DatabaseQuery, 90);
 
                 await ScrapeYahooFinanceDailyPrices(yahooDailyPriceScrapeRecords, procedureName, dailyPricesTickersScrapeFailed);
             }
             catch (Exception exception)
             {
                 _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Error,
-                        Detail = $"failed{Environment.NewLine}{exception}",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, 
+                    procedureName, Status.Error, $"failed{Environment.NewLine}{exception}");
             }
             finally
             {
@@ -130,7 +124,7 @@ namespace Argus
             }
         }
 
-        private async Task ScrapeYahooFinanceDailyPricesByTickers(RepeatedField<string> tickers, ConcurrentDictionary<string, Exception> dailyPricesByTickersScrapeFailed)
+        private async Task ScrapeYahooFinanceDailyPricesByTickers(RepeatedField<string> tickers, Dictionary<string, Exception> dailyPricesByTickersScrapeFailed)
         {
             var procedureName = nameof(ScrapeYahooFinanceDailyPricesByTickers);
 
@@ -138,15 +132,8 @@ namespace Argus
             {
                 if (!tickers.Any())
                 {
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Warning,
-                            Detail = "no tickers are provided",
-                            UtcTimestamp = DateTime.UtcNow
-                        }
-                    );
+                    ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, 
+                        procedureName, Status.Warning, "no tickers are provided");
                     _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data as no tickers are provided.");
 
                     await Task.CompletedTask;
@@ -154,22 +141,15 @@ namespace Argus
                 }
 
                 var yahooDailyPriceScrapeRecords = DatabaseHelper.Query<YahooDailyPriceScrapeRecord>(_connectionString,
-                    "SELECT Ticker, [Include], BenchmarkDate, BenchmarkOpen, BenchmarkHigh, " +
-                    "BenchmarkLow, BenchmarkClose, BenchmarkAdjustedClose, BenchmarkVolume " +
-                    "FROM dbo.YahooDailyPriceScrapeRecord WHERE [Include] = 1 " +
-                    $"AND Ticker IN ({string.Join(',', tickers.Select(x => "'" + x + "'"))})", 90);
+                    @$"SELECT Ticker, [Include], BenchmarkDate, BenchmarkOpen, BenchmarkHigh, 
+                       BenchmarkLow, BenchmarkClose, BenchmarkAdjustedClose, BenchmarkVolume 
+                       FROM dbo.YahooDailyPriceScrapeRecord WHERE [Include] = 1 
+                       AND Ticker IN ({string.Join(',', tickers.Select(x => "'" + x + "'"))})", 90);
 
                 if (!yahooDailyPriceScrapeRecords.Any())
                 {
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Warning,
-                            Detail = "no provided tickers can be found from dbo.YahooDailyPriceScrapeRecord",
-                            UtcTimestamp = DateTime.UtcNow
-                        }
-                    );
+                    ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, 
+                        procedureName, Status.Warning, "no provided tickers can be found from dbo.YahooDailyPriceScrapeRecord");
                     _logger.LogWarning($"Service '{_serviceName}' procedure '{procedureName}' did not scrape any data as no provided tickers can be found from dbo.YahooDailyPriceScrapeRecord.");
 
                     await Task.CompletedTask;
@@ -181,14 +161,8 @@ namespace Argus
             catch (Exception exception)
             {
                 _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed.");
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Error,
-                        Detail = $"failed{Environment.NewLine}{exception}",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, 
+                    procedureName, Status.Error, $"failed{Environment.NewLine}{exception}");
             }
             finally
             {
@@ -197,147 +171,70 @@ namespace Argus
         }
 
         private async Task ScrapeYahooFinanceDailyPrices(List<YahooDailyPriceScrapeRecord> yahooDailyPriceScrapeRecords, string procedureName,
-            ConcurrentDictionary<string, Exception> tickersScrapeFailed)
+            Dictionary<string, Exception> tickersScrapeFailed)
         {
             for (var i = 0; i < yahooDailyPriceScrapeRecords.Count; i++)
             {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Information,
-                        Detail = $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.{Environment.NewLine}Process:{i+1}/{yahooDailyPriceScrapeRecords.Count}{Environment.NewLine}Error:{tickersScrapeFailed.Count}",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
-                await Task.Delay(3000);
-
-                if (_cancellationToken.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                Dictionary<DateTime, YahooDailyPrice> tickerDailyPrices;
-
-                var scrapeRecord = yahooDailyPriceScrapeRecords[i];
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Information, 
+                    $"Service '{_serviceName}' procedure '{procedureName}' is scraping data.{Environment.NewLine}Process:{i+1}/{yahooDailyPriceScrapeRecords.Count}{Environment.NewLine}Error:{tickersScrapeFailed.Count}");
 
                 try
                 {
-                    var period1UnixTimestamp = scrapeRecord.BenchmarkDate.HasValue ?
-                        ScrapeServiceHelper.GetUnixTimeStamp(scrapeRecord.BenchmarkDate.Value.AddDays(-14)) : UnixTimestampStart;
-                    var period2UnixTimestamp = ScrapeServiceHelper.GetUnixTimeStamp(DateTime.Today.AddDays(1));
-                    var requestUri = $"{scrapeRecord.Ticker}?period1={period1UnixTimestamp}&period2={period2UnixTimestamp}&interval=1d&events=history&includeAdjustedClose=true";
+                    await Task.Delay(3000, _cancellationToken);
+                }
+                catch (TaskCanceledException)
+                {
+                    return;
+                }
+                
+                var scrapeRecord = yahooDailyPriceScrapeRecords[i];
 
-                    string content = null;
+                string fileContent;
+                try
+                {
+                    var requestUri = CreateRequestUri(scrapeRecord);
+                    
                     using (var request = new HttpRequestMessage(HttpMethod.Get, requestUri))
                     {
-                        try
-                        {
-                            using (var response = await _yahooFinanceHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, _cancellationToken))
-                            {
-                                try
-                                {
-                                    response.EnsureSuccessStatusCode();
-                                }
-                                catch (HttpRequestException exception)
-                                {
-                                    tickersScrapeFailed.AddOrUpdate(scrapeRecord.Ticker, exception, (k, v) => exception);
-                                    continue;
-                                }
-
-                                content = await response.Content.ReadAsStringAsync(_cancellationToken);
-                            }
-
-                            if (string.IsNullOrEmpty(content) || string.IsNullOrWhiteSpace(content))
-                            {
-                                var exception = new NullReferenceException($"No data can be scraped for ticker '{scrapeRecord.Ticker}'");
-                                tickersScrapeFailed.AddOrUpdate(scrapeRecord.Ticker, exception, (k, v) => exception);
-                                continue;
-                            }
-                        }
-                        catch (TaskCanceledException exception)
-                        {
-                            if (_cancellationToken.IsCancellationRequested)
-                            {
-                                return;
-                            }
-
-                            if (exception.InnerException is TimeoutException)
-                            {
-                                tickersScrapeFailed.AddOrUpdate(scrapeRecord.Ticker, exception.InnerException, (k, v) => exception.InnerException);
-                            }
-                            else
-                            {
-                                tickersScrapeFailed.AddOrUpdate(scrapeRecord.Ticker, exception, (k, v) => exception);
-                            }
-
-                            continue;
-                        }
-                        catch (Exception exception)
-                        {
-                            tickersScrapeFailed.AddOrUpdate(scrapeRecord.Ticker, exception, (k, v) => exception);
-                            continue;
-                        }
+                        fileContent = await ScrapeServiceHelper.DownloadStringFromWebAsync(_yahooFinanceHttpClient, request, _cancellationToken);
                     }
+                }
+                catch (TaskCanceledException)
+                {
+                    return;
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed to scrape ticker '{scrapeRecord.Ticker}'");
+                    AddOrUpdateTickerScrapeFailures(tickersScrapeFailed, scrapeRecord.Ticker, exception);
+                    continue;
+                }
 
-                    tickerDailyPrices = ProcessYahooDailyPrices(scrapeRecord.Ticker, content, _cancellationToken);
+                try
+                {
+                    var tickerDailyPrices = ProcessYahooDailyPrices(scrapeRecord.Ticker, fileContent);
                     if (_cancellationToken.IsCancellationRequested)
                     {
                         return;
                     }
 
-                    if (scrapeRecord.BenchmarkDate.HasValue && tickerDailyPrices.TryGetValue(scrapeRecord.BenchmarkDate.Value, out var price))
+                    if (scrapeRecord.BenchmarkDate.HasValue && tickerDailyPrices.TryGetValue(scrapeRecord.BenchmarkDate.Value, out var price) &&
+                        IsScrapeRecordAndNewScrapeDifferent(scrapeRecord, price))
                     {
-                        if (price.AdjustedClose != scrapeRecord.BenchmarkAdjustedClose || price.Open != scrapeRecord.BenchmarkOpen || price.High != scrapeRecord.BenchmarkHigh ||
-                            price.Low != scrapeRecord.BenchmarkLow || price.Close != scrapeRecord.BenchmarkClose || price.Volume != scrapeRecord.BenchmarkVolume)
-                        {
-                            yahooDailyPriceScrapeRecords.Add(
-                                new YahooDailyPriceScrapeRecord
-                                {
-                                    Ticker = scrapeRecord.Ticker,
-                                    Include = true,
-                                    BenchmarkDate = null,
-                                    BenchmarkOpen = null,
-                                    BenchmarkHigh = null,
-                                    BenchmarkLow = null,
-                                    BenchmarkClose = null,
-                                    BenchmarkAdjustedClose = null,
-                                    BenchmarkVolume = null
-                                });
-
-                            continue;
-                        }
+                        InstructToRescrapeTicker(yahooDailyPriceScrapeRecords, scrapeRecord.Ticker);
+                        continue;
                     }
 
-                    _dataPublishQueue.EnqueueDataToPublish(new DataToPublish
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure
-                        {
-                            Service = _serviceName,
-                            Procedure = procedureName
-                        },
-                        Data = JsonConvert.SerializeObject(tickerDailyPrices.Values)
-                    });
+                    ScrapeServiceHelper.EnqueueDataToPublish(_dataPublishQueue, _serviceName, procedureName, JsonConvert.SerializeObject(tickerDailyPrices.Values));
 
                     var scrapeRecordToSave = tickerDailyPrices.OrderByDescending(x => x.Key).Skip(1).First().Value;
-
-                    DatabaseHelper.ExecuteStoredProcedure(_connectionString, "dbo.YahooDailyPriceScrapeRecord_InsertUpdateSingleRecord",
-                        new
-                        {
-                            ticker = scrapeRecordToSave.Ticker,
-                            include = scrapeRecord.Include,
-                            benchmarkDate = scrapeRecordToSave.ValueDate,
-                            benchmarkOpen = scrapeRecordToSave.Open,
-                            benchmarkHigh = scrapeRecordToSave.High,
-                            benchmarkLow = scrapeRecordToSave.Low,
-                            benchmarkClose = scrapeRecordToSave.Close,
-                            benchmarkAdjustedClose = scrapeRecordToSave.AdjustedClose,
-                            benchmarkVolume = scrapeRecordToSave.Volume
-                        }, 90);
+                    InsertUpdateScrapeRecord(scrapeRecordToSave.Ticker, scrapeRecord.Include, scrapeRecordToSave.ValueDate, scrapeRecordToSave.Open,
+                        scrapeRecordToSave.High, scrapeRecordToSave.Low, scrapeRecordToSave.Close, scrapeRecordToSave.AdjustedClose, scrapeRecordToSave.Volume);
                 }
                 catch (Exception exception)
                 {
-                    tickersScrapeFailed.AddOrUpdate(scrapeRecord.Ticker, exception, (k, v) => exception);
+                    _logger.LogError(exception, $"Service '{_serviceName}' procedure '{procedureName}' failed to scrape ticker '{scrapeRecord.Ticker}'");
+                    AddOrUpdateTickerScrapeFailures(tickersScrapeFailed, scrapeRecord.Ticker, exception);
                 }
             }
 
@@ -348,55 +245,75 @@ namespace Argus
 
             if (tickersScrapeFailed.Any())
             {
-                var exceptions = new Dictionary<System.Type, HashSet<string>>();
-
-                var enumerator = tickersScrapeFailed.GetEnumerator();
-                while (enumerator.MoveNext())
-                {
-                    _logger.LogError(enumerator.Current.Value, $"Service '{_serviceName}' procedure '{procedureName}' failed to scrape ticker '{enumerator.Current.Key}'");
-
-                    if (exceptions.TryGetValue(enumerator.Current.Value.GetType(), out var tickers))
-                    {
-                        tickers.Add(enumerator.Current.Key);
-                    }
-                    else
-                    {
-                        exceptions.Add(enumerator.Current.Value.GetType(), new HashSet<string> { enumerator.Current.Key });
-                    }
-                }
+                var exceptions = ProcessScrapeFailures(tickersScrapeFailed);
 
                 foreach (var pair in exceptions)
                 {
-                    _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                        new GrpcServiceProcedureStatus
-                        {
-                            ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                            Status = Status.Error,
-                            Detail = $"failed to scrape tickers:{Environment.NewLine}{string.Join(",", pair.Value)}{Environment.NewLine}With exception type:{pair.Key}",
-                            UtcTimestamp = DateTime.UtcNow
-                        });
+                    ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Error, 
+                        $"failed to scrape tickers:{Environment.NewLine}{string.Join(",", pair.Value)}{Environment.NewLine}With exception type:{pair.Key}");
                 }
             }
             else
             {
-                _serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                    new GrpcServiceProcedureStatus
-                    {
-                        ServiceProcedure = new GrpcServiceProcedure { Service = _serviceName, Procedure = procedureName },
-                        Status = Status.Success,
-                        Detail = $"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
                 _logger.LogInformation($"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.");
+                ScrapeServiceHelper.EnqueueServiceProcedureStatus(_serviceProcedureStatusQueue, _serviceName, procedureName, Status.Success,
+                        $"Service '{_serviceName}' procedure '{procedureName}' finished scraping data.");
             }
         }
 
-        private Dictionary<DateTime, YahooDailyPrice> ProcessYahooDailyPrices(string ticker, string rawData, CancellationToken cancellationToken)
+        private void AddOrUpdateTickerScrapeFailures(Dictionary<string, Exception> tickersScrapeFailures, string ticker, Exception exception)
         {
+            if (tickersScrapeFailures.ContainsKey(ticker))
+            {
+                tickersScrapeFailures[ticker] = exception;
+            }
+            else
+            {
+                tickersScrapeFailures.Add(ticker, exception);
+            }
+        }
+
+        private Dictionary<System.Type, HashSet<string>> ProcessScrapeFailures(Dictionary<string, Exception> tickersScrapeFailed)
+        {
+            var exceptions = new Dictionary<System.Type, HashSet<string>>();
+
+            var enumerator = tickersScrapeFailed.GetEnumerator();
+            while (enumerator.MoveNext())
+            {
+                if (exceptions.TryGetValue(enumerator.Current.Value.GetType(), out var tickers))
+                {
+                    tickers.Add(enumerator.Current.Key);
+                }
+                else
+                {
+                    exceptions.Add(enumerator.Current.Value.GetType(), new HashSet<string> { enumerator.Current.Key });
+                }
+            }
+
+            return exceptions;
+        }
+
+        private Dictionary<DateTime, YahooDailyPrice> ProcessYahooDailyPrices(string ticker, string rawData)
+        {
+            const string YahooDailyPricesFileColumnNamesLine = "Date,Open,High,Low,Close,Adj Close,Volume";
+            const string DateColumnName = "Date";
+            const string OpenColumnName = "Open";
+            const string HighColumnName = "High";
+            const string LowColumnName = "Low";
+            const string CloseColumnName = "Close";
+            const string AdjustedCloseColumnName = "Adj Close";
+            const string VolumeColumnName = "Volume";
+
             var scrapeTimestampUtc = DateTime.UtcNow;
 
-            var columnNamesLineIndex = -1;
+            var lines = rawData.Split(Environment.NewLine);
+
+            if (!ScrapeServiceHelper.TryFindLineIndex(lines, YahooDailyPricesFileColumnNamesLine, out var columnNamesLineIndex))
+            {
+                throw new InvalidDataException("Failed to extract column names line.");
+            }
+
+            var columnNames = lines[columnNamesLineIndex].Split(",");
             var dateIndex = -1;
             var openIndex = -1;
             var highIndex = -1;
@@ -405,48 +322,31 @@ namespace Argus
             var adjustedCloseIndex = -1;
             var volumeIndex = -1;
 
-            var lines = rawData.Split(Environment.NewLine);
-
-            for (var i = 0; i < lines.Length; i++)
-            {
-                if (string.Equals(lines[i], "Date,Open,High,Low,Close,Adj Close,Volume", StringComparison.OrdinalIgnoreCase))
-                {
-                    columnNamesLineIndex = i;
-                    break;
-                }
-            }
-
-            if (columnNamesLineIndex == -1)
-            {
-                throw new InvalidDataException("Failed to extract column names line.");
-            }
-
-            var columnNames = lines[columnNamesLineIndex].Split(",");
             for (var i = 0; i < columnNames.Length; i++)
             {
                 var columnNameTrimmedLowerCase = columnNames[i].Trim().ToLower();
 
                 switch (columnNameTrimmedLowerCase)
                 {
-                    case "date":
+                    case DateColumnName:
                         dateIndex = i;
                         break;
-                    case "open":
+                    case OpenColumnName:
                         openIndex = i;
                         break;
-                    case "high":
+                    case HighColumnName:
                         highIndex = i;
                         break;
-                    case "low":
+                    case LowColumnName:
                         lowIndex = i;
                         break;
-                    case "close":
+                    case CloseColumnName:
                         closeIndex = i;
                         break;
-                    case "adj close":
+                    case AdjustedCloseColumnName:
                         adjustedCloseIndex = i;
                         break;
-                    case "volume":
+                    case VolumeColumnName:
                         volumeIndex = i;
                         break;
                     default:
@@ -500,6 +400,56 @@ namespace Argus
             }
 
             return result;
+        }
+
+        private void InsertUpdateScrapeRecord(string ticker, bool include, DateTime valueDate, decimal? open,
+            decimal? high, decimal? low, decimal? close, decimal? adjustedClose, decimal? volume)
+        {
+            DatabaseHelper.ExecuteStoredProcedure(_connectionString, "dbo.YahooDailyPriceScrapeRecord_InsertUpdateSingleRecord",
+                new
+                {
+                    ticker = ticker,
+                    include = include,
+                    benchmarkDate = valueDate,
+                    benchmarkOpen = open,
+                    benchmarkHigh = high,
+                    benchmarkLow = low,
+                    benchmarkClose = close,
+                    benchmarkAdjustedClose = adjustedClose,
+                    benchmarkVolume = volume
+                }, 90);
+        }
+
+        private bool IsScrapeRecordAndNewScrapeDifferent(YahooDailyPriceScrapeRecord scrapeRecord, YahooDailyPrice newScrape)
+        {
+            return newScrape.AdjustedClose != scrapeRecord.BenchmarkAdjustedClose || newScrape.Open != scrapeRecord.BenchmarkOpen || newScrape.High != scrapeRecord.BenchmarkHigh ||
+                newScrape.Low != scrapeRecord.BenchmarkLow || newScrape.Close != scrapeRecord.BenchmarkClose || newScrape.Volume != scrapeRecord.BenchmarkVolume;
+        }
+
+        private string CreateRequestUri(YahooDailyPriceScrapeRecord scrapeRecord)
+        {
+            var periodStartUnixTimestamp = scrapeRecord.BenchmarkDate.HasValue ?
+                        ScrapeServiceHelper.GetUnixTimeStamp(scrapeRecord.BenchmarkDate.Value.AddDays(-14)) : UnixTimestampStart;
+            var periodEndUnixTimestamp = ScrapeServiceHelper.GetUnixTimeStamp(DateTime.Today.AddDays(1));
+            
+            return $"{scrapeRecord.Ticker}?period1={periodStartUnixTimestamp}&period2={periodEndUnixTimestamp}&interval=1d&events=history&includeAdjustedClose=true";
+        }
+
+        private void InstructToRescrapeTicker(List<YahooDailyPriceScrapeRecord> yahooDailyPriceScrapeRecords, string ticker)
+        {
+            yahooDailyPriceScrapeRecords.Add(
+                new YahooDailyPriceScrapeRecord
+                {
+                    Ticker = ticker,
+                    Include = true,
+                    BenchmarkDate = null,
+                    BenchmarkOpen = null,
+                    BenchmarkHigh = null,
+                    BenchmarkLow = null,
+                    BenchmarkClose = null,
+                    BenchmarkAdjustedClose = null,
+                    BenchmarkVolume = null
+                });
         }
 
         public void Dispose()

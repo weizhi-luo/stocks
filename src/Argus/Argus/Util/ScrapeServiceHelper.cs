@@ -1,5 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -19,61 +18,107 @@ namespace Argus
             return new List<T>(elements);
         }
 
-        public static void HandleHttpRequestException(HttpRequestException exception, ILogger logger, GrpcServiceProcedureStatusQueue serviceProcedureStatusQueue, 
-            string serviceName, string procedureName, string responseMessage)
+        public static bool TryFindLineIndex(IList<string> lines, string targetLine, out int targetLineIndex)
         {
-            var errorInformation = $"failed with unsucessful HTTP response: {responseMessage}";
+            for (var i = 0; i < lines.Count; i++)
+            {
+                if (string.Equals(lines[i], targetLine))
+                {
+                    targetLineIndex = i;
+                    return true;
+                }
+            }
 
-            logger.LogError(exception, $"Service '{serviceName}' procedure '{procedureName}' {errorInformation}");
-            serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
+            targetLineIndex = -1;
+            return false;
+        }
+
+        public static void EnqueueServiceProcedureStatus(GrpcServiceProcedureStatusQueue grpcServiceProcedureStatusQueue, string serviceName,
+            string procedureName, Status status, string detail)
+        {
+            grpcServiceProcedureStatusQueue.EnqueueServiceProcedureStatus(
                 new GrpcServiceProcedureStatus
                 {
                     ServiceProcedure = new GrpcServiceProcedure { Service = serviceName, Procedure = procedureName },
-                    Status = Status.Error,
-                    Detail = $"{errorInformation}{Environment.NewLine}{exception}",
+                    Status = status,
+                    Detail = detail,
                     UtcTimestamp = DateTime.UtcNow
                 });
         }
 
-        public static void HandleScrapeException(Exception exception, ILogger logger, GrpcServiceProcedureStatusQueue serviceProcedureStatusQueue, 
-            string serviceName, string procedureName, CancellationTokenSource cancellationTokenSource)
+        public static void EnqueueDataToPublish(DataPublishQueue dataPublishQueue, string serviceName, string procedureName, string data)
         {
-            if (exception is TaskCanceledException && cancellationTokenSource.IsCancellationRequested)
-                return;
-
-            var errorDetail = GenerateScrapeErrorDetail(exception);
-
-            var loggingErrorMessage = $"Service '{serviceName}' procedure '{procedureName}' {errorDetail}.";
-
-            logger.LogError(exception, loggingErrorMessage);
-            serviceProcedureStatusQueue.EnqueueServiceProcedureStatus(
-                new GrpcServiceProcedureStatus
+            dataPublishQueue.EnqueueDataToPublish(new DataToPublish
+            {
+                ServiceProcedure = new GrpcServiceProcedure
                 {
-                    ServiceProcedure = new GrpcServiceProcedure { Service = serviceName, Procedure = procedureName },
-                    Status = Status.Error,
-                    Detail = $"{errorDetail}{Environment.NewLine}{exception}",
-                    UtcTimestamp = DateTime.UtcNow
-                });
+                    Service = serviceName,
+                    Procedure = procedureName
+                },
+                Data = data
+            });
         }
 
-        private static string GenerateScrapeErrorDetail(Exception exception)
+        /// <summary>
+        /// Download string from web
+        /// </summary>
+        /// <param name="httpClient"></param>
+        /// <param name="httpRequestMessage"></param>
+        /// <param name="cancellationToken"></param>
+        /// <returns>String content</returns>
+        /// <exception cref="DataScrapeFailException">The request failed</exception>
+        /// <exception cref="DataNotScrapedException">Download result is empty</exception>
+        /// <exception cref="TaskCanceledException">The request is cancelled</exception>
+        public static async Task<string> DownloadStringFromWebAsync(HttpClient httpClient, HttpRequestMessage httpRequestMessage, CancellationToken cancellationToken)
         {
-            if (exception is InvalidOperationException)
+            try
             {
-                return "failed due to uses a request which is already sent";
-            }
-            
-            if (exception is HttpRequestException)
-            {
-                return "failed due to an underlying issue such as network connectivity, DNS failure, server certificate validation or timeout";
-            }
-            
-            if (exception is TaskCanceledException && exception.InnerException is TimeoutException)
-            {
-                return "failed due to timeout";
-            }
+                string content = null;
 
-            return "failed";
+                using (var response = await httpClient.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
+                {
+                    try
+                    {
+                        response.EnsureSuccessStatusCode();
+                    }
+                    catch (HttpRequestException exception)
+                    {
+                        throw new DataScrapeFailException(response.Content.ReadAsStringAsync().Result, exception);
+                    }
+
+                    content = await response.Content.ReadAsStringAsync(cancellationToken);
+                }
+
+                if (string.IsNullOrEmpty(content) || string.IsNullOrWhiteSpace(content))
+                {
+                    throw new DataNotScrapedException();
+                }
+
+                return content;
+            }
+            catch (ArgumentException exception)
+            {
+                throw new DataScrapeFailException("The request is null.", exception);
+            }
+            catch (InvalidOperationException exception)
+            {
+                throw new DataScrapeFailException("The request message was already sent by the HttpClient instance.", exception);
+            }
+            catch (HttpRequestException exception)
+            {
+                throw new DataScrapeFailException(
+                    "The request failed due to an underlying issue such as network connectivity, DNS failure, server certificate validation or timeout.",
+                    exception);
+            }
+            catch (TaskCanceledException exception)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+
+                throw new DataScrapeFailException("The request failed due to timeout.", exception);
+            }
         }
 
         public static uint GetUnixTimeStamp(DateTime dateTime)
