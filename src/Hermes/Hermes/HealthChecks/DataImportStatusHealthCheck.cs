@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Diagnostics.HealthChecks;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -24,6 +25,20 @@ namespace Hermes.HealthChecks
             var statuses = _dataImportStatusQueue.GetLatestDataImportStatuses();
             var unprocessableMessages = _unprocessableMessageQueue.GetLatestUnprocessableMessages();
 
+            var (importErrors, importWarnings) = GetImportErrorsAndWarnings(statuses);
+
+            if (!importErrors.Any() && !importWarnings.Any() && !unprocessableMessages.Any())
+            {
+                return Task.FromResult(HealthCheckResult.Healthy("No import issues"));
+            }
+
+            var issuesDetail = GenerateIssuesDetail(importErrors, importWarnings, unprocessableMessages);
+
+            return Task.FromResult(HealthCheckResult.Unhealthy($"Issues in importing data:{Environment.NewLine}{issuesDetail}"));
+        }
+
+        private (List<DataImportStatus> ImportErrors, List<DataImportStatus> ImportWarnings) GetImportErrorsAndWarnings(ICollection<DataImportStatus> statuses)
+        {
             var importErrors = new List<DataImportStatus>();
             var importWarnings = new List<DataImportStatus>();
 
@@ -42,11 +57,12 @@ namespace Hermes.HealthChecks
                 }
             }
 
-            if (!importErrors.Any() && !importWarnings.Any() && !unprocessableMessages.Any())
-            {
-                return Task.FromResult(HealthCheckResult.Healthy("No import issues"));
-            }
+            return (importErrors, importWarnings);
+        }
 
+        private string GenerateIssuesDetail(List<DataImportStatus> importErrors, List<DataImportStatus> importWarnings, 
+            ConcurrentDictionary<string, UnprocessableMessage> unprocessableMessages)
+        {
             var issuesDetail = new StringBuilder();
 
             if (importErrors.Any())
@@ -54,7 +70,8 @@ namespace Hermes.HealthChecks
                 issuesDetail.AppendLine("Data import error(s):");
                 foreach (var importError in importErrors)
                 {
-                    issuesDetail.AppendLine($"\tSource service:{importError.DataScrapeServiceProcedure.Service}|Source procedure:{importError.DataScrapeServiceProcedure.Procedure}|Error:{importError.Detail}");
+                    issuesDetail.AppendLine(
+                        $"\tSource service:{importError.DataScrapeServiceProcedure.Service}|Source procedure:{importError.DataScrapeServiceProcedure.Procedure}|Error:{importError.Detail}");
                 }
             }
 
@@ -63,7 +80,8 @@ namespace Hermes.HealthChecks
                 issuesDetail.AppendLine("Data import warning(s):");
                 foreach (var importWarning in importWarnings)
                 {
-                    issuesDetail.AppendLine($"\tSource service:{importWarning.DataScrapeServiceProcedure.Service}|Source procedure:{importWarning.DataScrapeServiceProcedure.Procedure}|Warning:{importWarning.Detail}");
+                    issuesDetail.AppendLine(
+                        $"\tSource service:{importWarning.DataScrapeServiceProcedure.Service}|Source procedure:{importWarning.DataScrapeServiceProcedure.Procedure}|Warning:{importWarning.Detail}");
                 }
             }
 
@@ -77,7 +95,7 @@ namespace Hermes.HealthChecks
                 }
             }
 
-            return Task.FromResult(HealthCheckResult.Unhealthy($"Issues in importing data:{Environment.NewLine}{issuesDetail}"));
+            return issuesDetail.ToString();
         }
     }
 }
