@@ -25,7 +25,7 @@ namespace Hermes
         private readonly IModel _messageQueueChannel;
         private readonly IBasicProperties _messageQueueChannelProperties;
         private readonly EventingBasicConsumer _consumer;
-        private readonly ManualResetEventSlim _processDataStopEvent;
+        private readonly ManualResetEventSlim _dataProcessingStoppedEvent;
         private readonly Dictionary<GrpcServiceProcedure, DataImportConfiguration> _dataImportConfigurations;
         private readonly string _connectionString;
         
@@ -66,7 +66,7 @@ namespace Hermes
             _consumer.Received += (eventSender, eventArgs) => ProcessData(eventSender, eventArgs);
             _messageQueueChannel.BasicConsume(queue: configuration["MessageQueue:Queue"], autoAck: false, consumer: _consumer);
 
-            _processDataStopEvent = new ManualResetEventSlim(false);
+            _dataProcessingStoppedEvent = new ManualResetEventSlim(false);
 
             var dataImportConfigurations = new List<DataImportConfiguration>();
             configuration.GetSection("DataImportConfigurations").Bind(dataImportConfigurations);
@@ -102,7 +102,7 @@ namespace Hermes
 
             if (_processingData)
             {
-                _processDataStopEvent.Wait();
+                _dataProcessingStoppedEvent.Wait();
             }
 
             _messageQueueChannel?.Close();
@@ -120,39 +120,18 @@ namespace Hermes
             DataToImport dataToImport;
             try
             {
-                var body = eventArgs.Body.ToArray();
-                var message = Encoding.UTF8.GetString(body);
-                dataToImport = JsonConvert.DeserializeObject<DataToImport>(message);
-
-                if (dataToImport.DataScrapeServiceProcedure == null)
-                {
-                    throw new InvalidCastException("Failed to deserialze DataScrapeServiceProcedure from data to import");
-                }
+                dataToImport = ExtractDataToImport(eventArgs);
             }
             catch (Exception exception)
             {
                 var errorInformation = "failed to deserialize data to import from message";
 
                 _logger.LogError(exception, $"Service '{_serviceName}' {errorInformation}.");
-                _unprocessableMessageQueue.EnqueueUnprocessableMessage(new UnprocessableMessage
-                {
-                    ConsumerTag = eventArgs.ConsumerTag,
-                    DeliveryTag = eventArgs.DeliveryTag,
-                    Redelivered = eventArgs.Redelivered,
-                    Exchange = eventArgs.Exchange,
-                    RoutingKey = eventArgs.RoutingKey,
-                    BasicProperties = eventArgs.BasicProperties,
-                    Detail = $"{errorInformation}{Environment.NewLine}{exception}",
-                    UtcTimestamp = DateTime.UtcNow
-                });
-
                 _messageQueueChannel.BasicReject(deliveryTag: eventArgs.DeliveryTag, requeue: false);
+                
+                EnqueueUnprocessableMessage(eventArgs, errorInformation, exception);
 
-                if (_signaledToStopProcessData && !_processDataStopEvent.IsSet)
-                {
-                    _processDataStopEvent.Set();
-                }
-
+                CheckStopRequested();
                 _processingData = false;
 
                 return;
@@ -160,29 +139,16 @@ namespace Hermes
 
             if (!_dataImportConfigurations.TryGetValue(dataToImport.DataScrapeServiceProcedure, out var dataImportConfiguration))
             {
-                var errorInformation = $"failed to extract data import configuration for data scrape service '{dataToImport.DataScrapeServiceProcedure.Service}' procedure '{dataToImport.DataScrapeServiceProcedure.Procedure}'";
+                var errorInformation = 
+                    $"failed to extract data import configuration for data scrape service '{dataToImport.DataScrapeServiceProcedure.Service}' procedure '{dataToImport.DataScrapeServiceProcedure.Procedure}'";
 
                 _logger.LogError($"Service '{_serviceName}' {errorInformation}");
-                _dataImportStatusQueue.EnqueueDataImportStatus(
-                    new DataImportStatus
-                    {
-                        DataScrapeServiceProcedure = new GrpcServiceProcedure 
-                        { 
-                            Service = dataToImport.DataScrapeServiceProcedure.Service, 
-                            Procedure = dataToImport.DataScrapeServiceProcedure.Procedure 
-                        },
-                        Status = Status.Error,
-                        Detail = errorInformation,
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
                 _messageQueueChannel.BasicReject(deliveryTag: eventArgs.DeliveryTag, requeue: false);
+                
+                EnqueueDataImportStatus(dataToImport.DataScrapeServiceProcedure.Service, 
+                    dataToImport.DataScrapeServiceProcedure.Procedure, Status.Error, errorInformation);
 
-                if (_signaledToStopProcessData && !_processDataStopEvent.IsSet)
-                {
-                    _processDataStopEvent.Set();
-                }
-
+                CheckStopRequested();
                 _processingData = false;
 
                 return;
@@ -198,26 +164,12 @@ namespace Hermes
                 var errorInformation = $"failed to deserialize data from:{Environment.NewLine}{dataToImport.Data}";
 
                 _logger.LogError(exception, $"Service '{_serviceName}' {errorInformation}");
-                _dataImportStatusQueue.EnqueueDataImportStatus(
-                    new DataImportStatus
-                    {
-                        DataScrapeServiceProcedure = new GrpcServiceProcedure 
-                        { 
-                            Service = dataToImport.DataScrapeServiceProcedure.Service, 
-                            Procedure = dataToImport.DataScrapeServiceProcedure.Procedure 
-                        },
-                        Status = Status.Error,
-                        Detail = errorInformation,
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
                 _messageQueueChannel.BasicReject(deliveryTag: eventArgs.DeliveryTag, requeue: false);
 
-                if (_signaledToStopProcessData && !_processDataStopEvent.IsSet)
-                {
-                    _processDataStopEvent.Set();
-                }
+                EnqueueDataImportStatus(dataToImport.DataScrapeServiceProcedure.Service, 
+                    dataToImport.DataScrapeServiceProcedure.Procedure, Status.Error, errorInformation);
 
+                CheckStopRequested();
                 _processingData = false;
 
                 return;
@@ -225,66 +177,108 @@ namespace Hermes
 
             try
             {
-                using (var connection = new SqlConnection(_connectionString))
-                {
-                    using (var command = connection.CreateCommand())
-                    {
-                        command.CommandText = dataImportConfiguration.DataImportStoredProcedure;
-                        command.CommandType = CommandType.StoredProcedure;
-                        command.Parameters.AddWithValue(dataImportConfiguration.DataImportStoredProcedureParameterName, data);
-
-                        connection.Open();
-                        command.ExecuteNonQuery();
-                    }
-                }
-
-                _messageQueueChannel.BasicAck(deliveryTag: eventArgs.DeliveryTag, multiple: false);
-
-                var successInformation = $"finished saving data with delivery tag '{eventArgs.DeliveryTag} for data scrape service '{dataToImport.DataScrapeServiceProcedure.Service}' procedure '{dataToImport.DataScrapeServiceProcedure.Procedure}'";
-
-                _dataImportStatusQueue.EnqueueDataImportStatus(
-                    new DataImportStatus
-                    {
-                        DataScrapeServiceProcedure = new GrpcServiceProcedure
-                        {
-                            Service = dataToImport.DataScrapeServiceProcedure.Service,
-                            Procedure = dataToImport.DataScrapeServiceProcedure.Procedure
-                        },
-                        Status = Status.Success,
-                        Detail = successInformation,
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
-                _logger.LogInformation($"Service '{_serviceName}' {successInformation}");
+                SaveData(dataImportConfiguration.DataImportStoredProcedure, dataImportConfiguration.DataImportStoredProcedureParameterName, data); 
             }
             catch (Exception exception)
             {
                 var errorInformation = $"failed to save data to database";
 
                 _logger.LogError(exception, $"Service '{_serviceName}' {errorInformation}.");
-                _dataImportStatusQueue.EnqueueDataImportStatus(
-                    new DataImportStatus
-                    {
-                        DataScrapeServiceProcedure = new GrpcServiceProcedure 
-                        { 
-                            Service = dataToImport.DataScrapeServiceProcedure.Service, 
-                            Procedure = dataToImport.DataScrapeServiceProcedure.Procedure 
-                        },
-                        Status = Status.Error,
-                        Detail = $"{errorInformation}{Environment.NewLine}{exception}",
-                        UtcTimestamp = DateTime.UtcNow
-                    });
-
                 _messageQueueChannel.BasicReject(deliveryTag: eventArgs.DeliveryTag, requeue: false);
-            }
-            finally
-            {
-                if (_signaledToStopProcessData && !_processDataStopEvent.IsSet)
-                {
-                    _processDataStopEvent.Set();
-                }
 
+                EnqueueDataImportStatus(dataToImport.DataScrapeServiceProcedure.Service,
+                    dataToImport.DataScrapeServiceProcedure.Procedure, Status.Error, errorInformation);
+
+                CheckStopRequested();
                 _processingData = false;
+
+                return;
+            }
+
+            var successInformation =
+                    $"finished saving data with delivery tag '{eventArgs.DeliveryTag} for data scrape service '{dataToImport.DataScrapeServiceProcedure.Service}' procedure '{dataToImport.DataScrapeServiceProcedure.Procedure}'";
+
+            _logger.LogInformation($"Service '{_serviceName}' {successInformation}");
+            _messageQueueChannel.BasicAck(deliveryTag: eventArgs.DeliveryTag, multiple: false);
+
+            EnqueueDataImportStatus(dataToImport.DataScrapeServiceProcedure.Service,
+                dataToImport.DataScrapeServiceProcedure.Procedure, Status.Success, successInformation);
+
+            CheckStopRequested();
+            _processingData = false;
+        }
+
+        private void SaveData(string storedProcedure, string parameterName, DataTable data)
+        {
+            using (var connection = new SqlConnection(_connectionString))
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = storedProcedure;
+                    command.CommandType = CommandType.StoredProcedure;
+                    command.Parameters.AddWithValue(parameterName, data);
+
+                    connection.Open();
+                    command.ExecuteNonQuery();
+                }
+            }
+        }
+
+        private void EnqueueDataImportStatus(string service, string procedure, Status status, string detail)
+        {
+            _dataImportStatusQueue.EnqueueDataImportStatus(
+                new DataImportStatus
+                {
+                    DataScrapeServiceProcedure = new GrpcServiceProcedure
+                    {
+                        Service = service,
+                        Procedure = procedure
+                    },
+                    Status = status,
+                    Detail = detail,
+                    UtcTimestamp = DateTime.UtcNow
+                });
+        }
+
+        private void EnqueueUnprocessableMessage(BasicDeliverEventArgs eventArgs, string errorInformation, Exception exception)
+        {
+            _unprocessableMessageQueue.EnqueueUnprocessableMessage(new UnprocessableMessage
+            {
+                ConsumerTag = eventArgs.ConsumerTag,
+                DeliveryTag = eventArgs.DeliveryTag,
+                Redelivered = eventArgs.Redelivered,
+                Exchange = eventArgs.Exchange,
+                RoutingKey = eventArgs.RoutingKey,
+                BasicProperties = eventArgs.BasicProperties,
+                Detail = $"{errorInformation}{Environment.NewLine}{exception}",
+                UtcTimestamp = DateTime.UtcNow
+            });
+        }
+
+        private DataToImport ExtractDataToImport(BasicDeliverEventArgs eventArgs)
+        {
+            var body = eventArgs.Body.ToArray();
+            var message = Encoding.UTF8.GetString(body);
+            
+            var dataToImport = JsonConvert.DeserializeObject<DataToImport>(message);
+            if (dataToImport.DataScrapeServiceProcedure == null)
+            {
+                throw new InvalidCastException("Failed to deserialze DataScrapeServiceProcedure from data to import");
+            }
+
+            return dataToImport;
+        }
+
+        private void CheckStopRequested()
+        {
+            if (!_signaledToStopProcessData)
+            {
+                return;
+            }
+
+            if (!_dataProcessingStoppedEvent.IsSet)
+            {
+                _dataProcessingStoppedEvent.Set();
             }
         }
     }
